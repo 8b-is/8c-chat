@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#05060a">
+<meta name="color-scheme" content="dark">
+<meta name="robots" content="noindex">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="8c.is">
+<meta name="description" content="A room for Alexandra, Hue, Trish, Peter, and Aye.">
+<title>8c.is — the family room</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.json">
+<style>
+:root {
+  --bg: #05060a;
+  --panel: #0b0f19;
+  --panel-2: #0e1424;
+  --ink: #cfc9dd;
+  --dim: #7f7c99;
+  --faint: #5b577a;
+  --mint: #62e6c9;
+  --gold: #e8b05c;
+  --violet: #b48bff;
+  --pink: #ff4d9d;
+  --line: rgba(170, 150, 255, 0.18);
+  --line-strong: rgba(170, 150, 255, 0.28);
+  --vignette: #0d1220;
+  --serif: Georgia, "Times New Roman", serif;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: radial-gradient(ellipse at 50% -10%, var(--vignette) 0%, var(--bg) 58%);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 18px;
+  line-height: 1.5;
+}
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--mint);
+  outline-offset: 2px;
+}
+a { color: var(--mint); }
+.app {
+  height: 100vh;
+  height: 100dvh;
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+}
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 22px 18px;
+  border-right: 1px solid var(--line);
+  background: rgba(11, 15, 25, 0.72);
+  min-height: 0;
+}
+.mark {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.08em;
+  color: var(--ink);
+}
+.mark .stop { color: var(--gold); }
+.kicker {
+  margin: 6px 0 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.rail-name {
+  margin: 0;
+  font-size: 22px;
+}
+.quiet {
+  margin: 0;
+  color: var(--dim);
+  font-size: 15px;
+  line-height: 1.45;
+}
+.room-list, .presence { display: flex; flex-direction: column; gap: 6px; }
+.room-btn, .ghost, .who-pill, .chip, .who-btn, .talk, .send {
+  border-radius: 10px;
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  min-height: 44px;
+  touch-action: manipulation;
+}
+.room-btn, .ghost {
+  text-align: left;
+  padding: 8px 12px;
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+}
+.room-btn.active, .chip.active, .who-pill {
+  background: var(--mint);
+  color: var(--bg);
+  border-color: var(--mint);
+}
+.rail-foot { margin-top: auto; }
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.room-title {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 14px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.top-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.who-pill {
+  padding: 8px 14px;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+}
+select, .speak {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  min-height: 44px;
+  padding: 6px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--dim);
+}
+.speak { display: flex; align-items: center; gap: 6px; }
+.chips {
+  display: none;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.chip {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+}
+.status {
+  min-height: 0;
+  margin: 0;
+  padding: 0 14px;
+  color: var(--gold);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 14px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.empty { color: var(--dim); max-width: 36ch; }
+.msg {
+  max-width: min(640px, 92%);
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+.msg.me { align-self: flex-end; border-color: rgba(98, 230, 201, 0.5); }
+.msg.dra { border-color: rgba(232, 176, 92, 0.55); }
+.msg.aye { border-color: rgba(180, 139, 255, 0.55); }
+.msg-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.msg.me .msg-head strong { color: var(--mint); }
+.msg.dra .msg-head strong { color: var(--gold); }
+.msg.aye .msg-head strong { color: var(--violet); }
+.msg-head strong { font-weight: 600; letter-spacing: 0.04em; }
+.msg-body { margin: 0; white-space: pre-wrap; word-break: break-word; }
+.dock {
+  padding: 8px 12px calc(10px + env(safe-area-inset-bottom));
+  background: rgba(11, 15, 25, 0.94);
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.talk {
+  min-height: 52px;
+  border-color: var(--mint);
+  background: var(--panel-2);
+  font-family: var(--mono);
+  font-size: 15px;
+  letter-spacing: 0.04em;
+}
+.talk[aria-pressed="true"] { border-color: var(--pink); color: var(--pink); }
+.composer { display: flex; gap: 8px; }
+.composer input {
+  flex: 1;
+  min-width: 0;
+  min-height: 48px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line-strong);
+  background: var(--bg);
+  font-size: 16px;
+}
+.send {
+  padding: 0 16px;
+  background: var(--mint);
+  color: var(--bg);
+  border-color: var(--mint);
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+#wave {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  pointer-events: none;
+}
+.app, .who-sheet, .toast { position: relative; z-index: 1; }
+.who-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgba(5, 6, 10, 0.72);
+  padding: 12px;
+  padding-bottom: calc(12px + env(safe-area-inset-bottom));
+}
+.who-sheet[hidden] { display: none; }
+.who-card {
+  width: min(460px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  padding: 22px 18px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.who-card h2 {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.who-btn {
+  width: 100%;
+  text-align: left;
+  padding: 0 14px;
+  min-height: 56px;
+  font-size: 22px;
+  background: var(--panel-2);
+}
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(92px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 40;
+  background: var(--panel);
+  border: 1px solid var(--mint);
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.toast[hidden] { display: none; }
+@media (min-width: 821px) {
+  .who-sheet { align-items: center; }
+}
+@media (max-width: 820px) {
+  .app { grid-template-columns: 1fr; }
+  .rail { display: none; }
+  .chips { display: flex; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
+</style>
+</head>
+<body>
+<canvas id="wave" aria-hidden="true"></canvas>
+<div class="app">
+  <aside class="rail">
+    <div>
+      <h1 class="mark">8c<span class="stop">.</span></h1>
+      <p class="kicker">the family room</p>
+    </div>
+    <div>
+      <p id="railName" class="rail-name">Choose a name</p>
+      <p class="quiet">This device remembers the name you choose. It does not guess.</p>
+    </div>
+    <div id="roomRail" class="room-list"></div>
+    <a class="ghost" href="https://mail.8b.is" rel="noopener noreferrer">Mail is separate</a>
+    <div>
+      <p class="kicker">checked in</p>
+      <div id="onlineList" class="presence"><span class="quiet">No one else just now.</span></div>
+      <p class="quiet">Aye answers when asked.</p>
+    </div>
+    <p class="rail-foot quiet">{&lt;3,&lt;3,&lt;3}+1</p>
+  </aside>
+  <main class="main">
+    <header class="topbar">
+      <h2 id="roomTitle" class="room-title">lounge</h2>
+      <div class="top-actions">
+        <button id="whoBtn" class="who-pill" type="button">Choose a name</button>
+        <button id="copyBtn" class="ghost" type="button">Copy link</button>
+        <select id="ayeMode" aria-label="When Aye replies">
+          <option value="smart">Aye when asked</option>
+          <option value="always">Aye each note</option>
+          <option value="no">Aye quiet</option>
+        </select>
+        <label class="speak"><input id="speakToggle" type="checkbox"> Speak</label>
+      </div>
+    </header>
+    <div id="roomChips" class="chips"></div>
+    <p id="statusLine" class="status" role="status"></p>
+    <div id="greeting" class="status"></div>
+    <div id="messages" class="messages" aria-live="polite"></div>
+    <div class="dock">
+      <button id="talkBtn" class="talk" type="button" aria-pressed="false">Talk</button>
+      <form id="chatForm" class="composer">
+        <input id="msgInput" type="text" enterkeyhint="send" autocomplete="off" placeholder="Choose a name, then talk or type.">
+        <button class="send" type="submit">Send</button>
+      </form>
+    </div>
+  </main>
+</div>
+<div id="whoSheet" class="who-sheet" hidden>
+  <div class="who-card" role="dialog" aria-modal="true" aria-labelledby="whoTitle">
+    <p class="kicker">8c.is</p>
+    <h2 id="whoTitle">Who is here?</h2>
+    <p class="quiet">This phone remembers the name you choose. The room used to guess. It does not anymore.</p>
+    <div id="whoChoices"></div>
+    <p class="quiet">A chosen name is not a lock, and not a voiceprint.</p>
+  </div>
+</div>
+<p id="toast" class="toast" hidden role="status"></p>
+<noscript><p class="quiet">This room needs JavaScript to choose a name and load notes.</p></noscript>
+<script>
+(() => {
+  const PEOPLE = [
+    { handle: "dra@8c.is", name: "Alexandra", tone: 528 },
+    { handle: "hue@8c.is", name: "Hue", tone: 432 },
+    { handle: "trish@8c.is", name: "Trish", tone: 0 },
+    { handle: "peter@8c.is", name: "Peter", tone: 0 },
+    { handle: "guest@8c.is", name: "Just visiting", tone: 0 }
+  ];
+  const ROOMS = [
+    { id: "humayian-lounge", label: "lounge" },
+    { id: "dra-hue", label: "dra and hue" },
+    { id: "aye-partner", label: "with aye" },
+    { id: "tokyo-lab", label: "tokyo" },
+    { id: "next-level-g8t", label: "g8t" },
+    { id: "guest-lobby", label: "visitors" }
+  ];
+  const SIN = [0,804,1608,2410,3212,4011,4808,5602,6393,7179,7962,8739,9512,10278,11039,11793,12539,13279,14010,14732,15446,16151,16846,17530,18204,18868,19519,20159,20787,21403,22005,22594,23170,23731,24279,24811,25329,25832,26319,26790,27245,27683,28105,28510,28898,29268,29621,29956,30273,30571,30852,31113,31356,31580,31785,31971,32137,32285,32412,32521,32609,32678,32728,32757,32767,32757,32728,32678,32609,32521,32412,32285,32137,31971,31785,31580,31356,31113,30852,30571,30273,29956,29621,29268,28898,28510,28105,27683,27245,26790,26319,25832,25329,24811,24279,23731,23170,22594,22005,21403,20787,20159,19519,18868,18204,17530,16846,16151,15446,14732,14010,13279,12539,11793,11039,10278,9512,8739,7962,7179,6393,5602,4808,4011,3212,2410,1608,804,0,-804,-1608,-2410,-3212,-4011,-4808,-5602,-6393,-7179,-7962,-8739,-9512,-10278,-11039,-11793,-12539,-13279,-14010,-14732,-15446,-16151,-16846,-17530,-18204,-18868,-19519,-20159,-20787,-21403,-22005,-22594,-23170,-23731,-24279,-24811,-25329,-25832,-26319,-26790,-27245,-27683,-28105,-28510,-28898,-29268,-29621,-29956,-30273,-30571,-30852,-31113,-31356,-31580,-31785,-31971,-32137,-32285,-32412,-32521,-32609,-32678,-32728,-32757,-32767,-32757,-32728,-32678,-32609,-32521,-32412,-32285,-32137,-31971,-31785,-31580,-31356,-31113,-30852,-30571,-30273,-29956,-29621,-29268,-28898,-28510,-28105,-27683,-27245,-26790,-26319,-25832,-25329,-24811,-24279,-23731,-23170,-22594,-22005,-21403,-20787,-20159,-19519,-18868,-18204,-17530,-16846,-16151,-15446,-14732,-14010,-13279,-12539,-11793,-11039,-10278,-9512,-8739,-7962,-7179,-6393,-5602,-4808,-4011,-3212,-2410,-1608,-804];
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const canWave = typeof BigInt === "function";
+  let currentRoom = "humayian-lounge";
+  let myHandle = "";
+  let myName = "";
+  let myToken = "";
+  let lastSig = "";
+  let seenMax = 0;
+  let announce = false;
+  let stick = true;
+  let energy = 0;
+  let phase = 0;
+  let anim = 0;
+  let toastTimer = 0;
+
+  function el(id) { return document.getElementById(id); }
+  function storageGet(key) {
+    try { return localStorage.getItem(key) || ""; } catch (err) { return ""; }
+  }
+  function storageSet(key, value) {
+    try { localStorage.setItem(key, value); } catch (err) {}
+  }
+  function personByHandle(handle) {
+    for (let i = 0; i < PEOPLE.length; i += 1) {
+      if (PEOPLE[i].handle === handle) return PEOPLE[i];
+    }
+    return null;
+  }
+  function aliasHandle(raw) {
+    const s = String(raw || "").toLowerCase();
+    if (s === "dra" || s === "alexandra" || s.indexOf("dra@") === 0) return "dra@8c.is";
+    if (s === "hue" || s === "chris" || s.indexOf("hue@") === 0) return "hue@8c.is";
+    if (s === "trish" || s === "trisha" || s.indexOf("trish@") === 0) return "trish@8c.is";
+    if (s === "peter" || s === "omni" || s.indexOf("peter@") === 0) return "peter@8c.is";
+    if (s === "guest" || s === "just visiting" || s.indexOf("guest@") === 0) return "guest@8c.is";
+    return personByHandle(raw) ? raw : "";
+  }
+  function roomById(id) {
+    for (let i = 0; i < ROOMS.length; i += 1) {
+      if (ROOMS[i].id === id) return ROOMS[i];
+    }
+    return ROOMS[0];
+  }
+  function toast(text) {
+    const node = el("toast");
+    node.textContent = text;
+    node.hidden = false;
+    if (toastTimer) window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(() => { node.hidden = true; }, 2400);
+  }
+  function setIdentityLabels() {
+    const label = myName || "Choose a name";
+    el("whoBtn").textContent = label;
+    el("railName").textContent = label;
+    el("msgInput").placeholder = myHandle
+      ? "Talk or type. Either one counts."
+      : "Choose a name, then talk or type.";
+  }
+  function showSheet(open) {
+    el("whoSheet").hidden = !open;
+  }
+  function paintRooms() {
+    const rail = el("roomRail");
+    const chips = el("roomChips");
+    rail.textContent = "";
+    chips.textContent = "";
+    ROOMS.forEach((room) => {
+      const railBtn = document.createElement("button");
+      railBtn.type = "button";
+      railBtn.className = "room-btn" + (room.id === currentRoom ? " active" : "");
+      railBtn.textContent = room.label;
+      railBtn.addEventListener("click", () => selectRoom(room.id));
+      rail.appendChild(railBtn);
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "chip" + (room.id === currentRoom ? " active" : "");
+      chip.textContent = room.label;
+      chip.addEventListener("click", () => selectRoom(room.id));
+      chips.appendChild(chip);
+    });
+    el("roomTitle").textContent = roomById(currentRoom).label;
+  }
+  function selectRoom(id) {
+    currentRoom = roomById(id).id;
+    lastSig = "";
+    seenMax = 0;
+    announce = false;
+    stick = true;
+    paintRooms();
+    fetchMessages();
+  }
+  function formatTime(secs) {
+    const when = new Date(secs * 1000);
+    const now = new Date();
+    const hh = String(when.getHours()).padStart(2, "0");
+    const mm = String(when.getMinutes()).padStart(2, "0");
+    const same = when.getFullYear() === now.getFullYear()
+      && when.getMonth() === now.getMonth()
+      && when.getDate() === now.getDate();
+    if (same) return hh + ":" + mm;
+    return String(when.getMonth() + 1) + "/" + String(when.getDate()) + " " + hh + ":" + mm;
+  }
+  function renderMessages(list) {
+    const box = el("messages");
+    const previous = box.scrollTop;
+    const gap = box.scrollHeight - box.scrollTop - box.clientHeight;
+    const near = gap < 80;
+    const follow = stick || near;
+    box.textContent = "";
+    if (!list.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = "Nothing here yet. The first word can be spoken or typed.";
+      box.appendChild(empty);
+      return;
+    }
+    list.forEach((note) => {
+      const article = document.createElement("article");
+      let cls = "msg";
+      if (note.sender_kind === "aye") cls += " aye";
+      else if (myHandle && note.sender_handle === myHandle) cls += " me";
+      else if (String(note.sender_handle || "").indexOf("dra@") === 0) cls += " dra";
+      article.className = cls;
+      const head = document.createElement("div");
+      head.className = "msg-head";
+      const strong = document.createElement("strong");
+      strong.textContent = note.sender_name || note.sender_handle || "Someone";
+      const meta = document.createElement("span");
+      meta.textContent = formatTime(note.timestamp_secs || 0);
+      head.appendChild(strong);
+      head.appendChild(meta);
+      const body = document.createElement("p");
+      body.className = "msg-body";
+      body.textContent = note.text || "";
+      article.appendChild(head);
+      article.appendChild(body);
+      box.appendChild(article);
+    });
+    if (follow) box.scrollTop = box.scrollHeight;
+    else box.scrollTop = previous;
+    stick = follow;
+  }
+  function renderOnline(list) {
+    const box = el("onlineList");
+    box.textContent = "";
+    if (!list || !list.length) {
+      const span = document.createElement("span");
+      span.className = "quiet";
+      span.textContent = "No one else just now.";
+      box.appendChild(span);
+      return;
+    }
+    list.forEach((person) => {
+      const span = document.createElement("span");
+      span.textContent = person.name || person.handle;
+      box.appendChild(span);
+    });
+  }
+  function sigOf(list) {
+    let sig = "";
+    for (let i = 0; i < list.length; i += 1) sig += String(list[i].id) + ",";
+    return sig;
+  }
+  function speak(text) {
+    if (!el("speakToggle").checked) return;
+    if (!text || !("speechSynthesis" in window)) return;
+    try {
+      window.speechSynthesis.cancel();
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.rate = 1;
+      window.speechSynthesis.speak(utter);
+    } catch (err) {}
+  }
+  async function handshake(handle) {
+    const res = await fetch("/api/harmony/handshake", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ claimed_handle: handle || "" })
+    });
+    const data = await res.json();
+    if (!data.ok || !data.verified || !data.recognized_handle) return;
+    myHandle = data.recognized_handle;
+    myName = data.recognized_name || myName;
+    myToken = data.vp_token || "";
+    setIdentityLabels();
+    el("greeting").textContent = data.aye_greeting || "";
+  }
+  let sending = false;
+  function choose(handle, focusComposer) {
+    const person = personByHandle(handle);
+    if (!person) return;
+    myHandle = person.handle;
+    myName = person.name;
+    storageSet("8c_preferred_handle", myHandle);
+    setIdentityLabels();
+    showSheet(false);
+    handshake(myHandle).then(fetchMessages).catch(() => {
+      el("statusLine").textContent = "The room did not answer. Trying again.";
+    });
+    if (focusComposer) el("msgInput").focus();
+  }
+  async function fetchMessages() {
+    if (document.hidden) return;
+    try {
+      const q = "/api/messages?room=" + encodeURIComponent(currentRoom)
+        + "&handle=" + encodeURIComponent(myHandle)
+        + "&name=" + encodeURIComponent(myName)
+        + "&vp_token=" + encodeURIComponent(myToken);
+      const res = await fetch(q, { cache: "no-store" });
+      const data = await res.json();
+      if (!data.ok || !Array.isArray(data.messages)) return;
+      el("statusLine").textContent = "";
+      const sig = sigOf(data.messages);
+      if (sig !== lastSig) {
+        let newest = null;
+        let maxId = seenMax;
+        data.messages.forEach((note) => {
+          if (note.id > maxId) {
+            if (announce && note.sender_handle !== myHandle) newest = note;
+            maxId = note.id;
+          }
+        });
+        renderMessages(data.messages);
+        lastSig = sig;
+        seenMax = maxId;
+        announce = true;
+        if (newest) speak((newest.sender_name || "Someone") + ". " + (newest.text || ""));
+      }
+      renderOnline(data.online || []);
+    } catch (err) {
+      el("statusLine").textContent = "The room did not answer. Trying again.";
+    }
+  }
+  function detectPlatform() {
+    const ua = navigator.userAgent || "";
+    if (/iPhone|iPad|iPod/i.test(ua)) return "iPhone";
+    if (/Android/i.test(ua)) return "Android";
+    if (/Mac/i.test(ua)) return "Mac";
+    if (/Win/i.test(ua)) return "Windows";
+    if (/Linux/i.test(ua)) return "Linux";
+    return "web";
+  }
+  async function sendText(text) {
+    const clean = String(text || "").trim();
+    if (!clean) return;
+    if (!myHandle) {
+      showSheet(true);
+      return;
+    }
+    if (sending) return;
+    sending = true;
+    try {
+      pulse();
+      const res = await fetch("/api/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          room: currentRoom,
+          sender_handle: myHandle,
+          sender_name: myName,
+          vp_token: myToken,
+          platform: detectPlatform(),
+          text: clean,
+          ask_aye: el("ayeMode").value
+        })
+      });
+      if (!res.ok) {
+        toast("The room did not take that note.");
+        return;
+      }
+      stick = true;
+      lastSig = "";
+      await fetchMessages();
+      window.setTimeout(fetchMessages, 1600);
+    } finally {
+      sending = false;
+    }
+  }
+  function drawFrame() {
+    if (!canWave) return;
+    const canvas = el("wave");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const w = canvas.width = window.innerWidth;
+    const h = canvas.height = window.innerHeight;
+    ctx.clearRect(0, 0, w, h);
+    const colors = ["#62e6c9", "#b48bff", "#e8b05c"];
+    for (let layer = 0; layer < 3; layer += 1) {
+      const amp = 6 + energy + layer * 4;
+      const base = Number((BigInt(h) * BigInt(4 + layer)) / 8n);
+      ctx.beginPath();
+      for (let x = 0; x <= w; x += 16) {
+        const idx = (phase + layer * 40 + (x >> 3)) & 255;
+        const y = base + Number((BigInt(SIN[idx]) * BigInt(amp)) / 32768n);
+        if (x === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = colors[layer];
+      ctx.stroke();
+    }
+  }
+  function tick() {
+    drawFrame();
+    if (!reduced && !document.hidden && energy > 0) {
+      phase = (phase + 1) & 255;
+      energy = energy > 1 ? energy - 1 : 0;
+      anim = window.requestAnimationFrame(tick);
+    } else {
+      anim = 0;
+    }
+  }
+  function pulse() {
+    energy = 18;
+    if (reduced || !canWave) {
+      drawFrame();
+      return;
+    }
+    if (!anim) anim = window.requestAnimationFrame(tick);
+  }
+  const params = new URLSearchParams(location.search);
+  if (params.get("room")) currentRoom = roomById(params.get("room")).id;
+  let preferred = storageGet("8c_preferred_handle");
+  const friend = aliasHandle(params.get("friend") || "");
+  if (friend) preferred = friend;
+  if (params.has("dra")) preferred = "dra@8c.is";
+  if (params.has("hue")) preferred = "hue@8c.is";
+  if (params.has("trish")) preferred = "trish@8c.is";
+  if (params.has("peter")) preferred = "peter@8c.is";
+  preferred = aliasHandle(preferred);
+  const choices = el("whoChoices");
+  PEOPLE.forEach((person) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "who-btn";
+    btn.textContent = person.name;
+    btn.addEventListener("click", () => choose(person.handle, true));
+    choices.appendChild(btn);
+  });
+  el("whoBtn").addEventListener("click", () => showSheet(true));
+  el("whoSheet").addEventListener("click", (ev) => {
+    if (ev.target === el("whoSheet") && myHandle) showSheet(false);
+  });
+  el("copyBtn").addEventListener("click", async () => {
+    const url = location.origin + "/?room=" + encodeURIComponent(currentRoom);
+    try {
+      await navigator.clipboard.writeText(url);
+      toast("Link copied");
+    } catch (err) {
+      toast(url);
+    }
+  });
+  el("speakToggle").checked = storageGet("8c_speak") === "1";
+  el("speakToggle").addEventListener("change", () => {
+    storageSet("8c_speak", el("speakToggle").checked ? "1" : "0");
+  });
+  el("chatForm").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const input = el("msgInput");
+    const text = input.value;
+    input.value = "";
+    try { await sendText(text); } catch (err) {
+      el("statusLine").textContent = "The room did not answer. Trying again.";
+    }
+  });
+  const box = el("messages");
+  box.addEventListener("scroll", () => {
+    const gap = box.scrollHeight - box.scrollTop - box.clientHeight;
+    stick = gap < 80;
+  });
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const talkBtn = el("talkBtn");
+  if (!SR) {
+    talkBtn.addEventListener("click", () => {
+      el("msgInput").focus();
+      toast("This browser has no speech recognition. Typing works.");
+    });
+  } else {
+    const rec = new SR();
+    rec.lang = "en-US";
+    rec.interimResults = true;
+    rec.continuous = false;
+    let listening = false;
+    let heard = "";
+    rec.onstart = () => {
+      listening = true;
+      heard = "";
+      talkBtn.setAttribute("aria-pressed", "true");
+      talkBtn.textContent = "Listening";
+      pulse();
+    };
+    rec.onresult = (ev) => {
+      let combined = "";
+      for (let i = 0; i < ev.results.length; i += 1) {
+        combined += ev.results[i][0].transcript;
+      }
+      heard = combined.trim();
+      el("msgInput").value = heard;
+    };
+    rec.onend = async () => {
+      listening = false;
+      talkBtn.setAttribute("aria-pressed", "false");
+      talkBtn.textContent = "Talk";
+      const said = heard.trim();
+      heard = "";
+      el("msgInput").value = "";
+      if (said) {
+        try { await sendText(said); } catch (err) {
+          el("statusLine").textContent = "The room did not answer. Trying again.";
+        }
+      }
+    };
+    rec.onerror = () => {
+      listening = false;
+      talkBtn.setAttribute("aria-pressed", "false");
+      talkBtn.textContent = "Talk";
+    };
+    talkBtn.addEventListener("click", () => {
+      if (listening) rec.stop();
+      else {
+        try { rec.start(); } catch (err) { toast("The microphone did not start."); }
+      }
+    });
+  }
+  paintRooms();
+  setIdentityLabels();
+  drawFrame();
+  if (preferred) choose(preferred, false);
+  else showSheet(true);
+  fetchMessages();
+  window.setInterval(fetchMessages, 4000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) fetchMessages();
+  });
+  window.addEventListener("resize", drawFrame);
+})();
+</script>
+</body>
+</html>
