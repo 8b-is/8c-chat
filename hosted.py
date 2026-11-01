@@ -235,7 +235,8 @@ def agy(agent, prompt):
     args = [agent['binary'], '--model', agent['model'], '--sandbox', '--mode', 'accept-edits',
             '--settings', json.dumps(settings), '--disable-slash-commands', '--output-format', 'stream-json',
             '--input-format', 'stream-json', '--print-timeout', str(timeout-5)+'s']
-    raw = command(args, agent['workspace'], timeout, json.dumps({'event': 'user', 'message': {'content': prompt}}) + '\n')
+    agy_prompt = prompt + '\n(Runtime note for agy: you are already inside the agy OS sandbox; use your native read_file, write_file, and MCP tools directly rather than nested 8c-run shells, and always include a concise public reply.)\n'
+    raw = command(args, agent['workspace'], timeout, json.dumps({'event': 'user', 'message': {'content': agy_prompt}}) + '\n')
     events = [json.loads(line, parse_float=str) for line in raw.splitlines() if line.strip()]
     initial = next(e['init'] for e in events if e['event'] == 'init')
     result = next(e['result'] for e in reversed(events) if e['event'] == 'result')

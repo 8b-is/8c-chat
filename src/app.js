@@ -159,7 +159,7 @@
     return node;
   }
   function renderMessages(messages) {
-    const signature = messages.map(m => m.id).join(",") + ":" + (profile?.handle || "");
+    const signature = messages.map(m => m.id + ":" + (m.work?.artifacts?.length || 0)).join(",") + ":" + (profile?.handle || "");
     if (signature === lastMessages) return;
     const box = el("messages");
     const current = new Map([...box.querySelectorAll("article")].map(node => [node.dataset.id, node]));
@@ -229,6 +229,11 @@
     if (!d.text.trim() || sending.has(selected)) return;
     if (!profile) { showIdentity(); return; }
     const text = d.text.trim();
+    const mention = text.match(/^@([A-Za-z0-9_-]+)\b/);
+    if (mention) {
+      const target = agents.find(a => a.rooms?.includes(selected) && (a.id.toLowerCase() === mention[1].toLowerCase() || a.name.toLowerCase() === mention[1].toLowerCase()));
+      if (target) mode = target.id;
+    }
     if (d.submitted !== text || !d.id) { d.id = crypto.randomUUID(); d.submitted = text; }
     const id = d.id;
     d.error = ""; saveDrafts(); sending.add(selected);

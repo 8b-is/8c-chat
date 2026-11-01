@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const REVISION: u64 = 11;
+pub const REVISION: u64 = 12;
 const RESTING: &str = "Pricey, but worth it ✨ — resting for a little recharge.";
 const RECENT: usize = 64;
 const MAX_PENDING: usize = 32;
