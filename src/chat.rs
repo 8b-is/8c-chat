@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const REVISION: u64 = 8;
+pub const REVISION: u64 = 9;
 const RECENT: usize = 64;
 const MAX_PENDING: usize = 32;
 const PROFILE_CAP: usize = 4096;
@@ -89,6 +89,7 @@ pub struct Chat {
     agents: Vec<Json>,
     agent_seen: BTreeMap<String, (u64, Json)>,
     worker_key: String,
+    memory_required: bool,
     rates: BTreeMap<String, (u64, u64)>,
     tub: Json,
     next_id: u64,
@@ -140,6 +141,7 @@ impl Chat {
             agents,
             agent_seen: BTreeMap::new(),
             worker_key,
+            memory_required: conf.get("memory").get("required").boolean(),
             rates: BTreeMap::new(),
             next_id: 1,
             imported: false,
@@ -349,7 +351,7 @@ impl Chat {
     pub fn agents_public(&self) -> Vec<Json> {
         self.agents.iter().map(|agent| {
             let seen = self.agent_seen.get(agent.get("id").text());
-            let online = seen.is_some_and(|(t,_)| now().saturating_sub(*t) < 180);
+            let online = seen.is_some_and(|(t, proof)| now().saturating_sub(*t) < 180 && (!self.memory_required || proof.get("memory").get("ready").boolean()));
             obj! {"id" => agent.get("id").clone(), "name" => agent.get("name").clone(), "model" => agent.get("model").clone(), "runtime" => agent.get("runtime").clone(), "personality_revision" => agent.get("personality_revision").clone(), "rooms" => agent.get("rooms").clone(), "online" => online, "evidence" => seen.map(|(_,v)| v.clone()).unwrap_or(Json::Null)}
         }).collect()
     }
@@ -526,6 +528,7 @@ impl Chat {
             .map(|a| {
                 let mut job = self.new_job(&a, room, handle, id + 1, id, false);
                 job.set("prompt", self.prompt(&job, &a, Some(&message)));
+                job.set("query", message.get("text").clone());
                 if self.jobs.values().filter(|j| !done(j)).count() >= MAX_PENDING {
                     job.set("status", "failed");
                     job.set(
@@ -627,7 +630,11 @@ impl Chat {
                     && self
                         .agent_seen
                         .get(a.get("id").text())
-                        .is_some_and(|(t, _)| current.saturating_sub(*t) < 180)
+                        .is_some_and(|(t, proof)| {
+                            current.saturating_sub(*t) < 180
+                                && (!self.memory_required
+                                    || proof.get("memory").get("ready").boolean())
+                        })
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -679,7 +686,11 @@ impl Chat {
         {
             return Err("Worker model provenance mismatch".into());
         }
-        self.agent_seen.insert(agent_id.into(), (now(), obj! {"model_digest" => body.get("digest").clone(), "runtime" => body.get("runtime").clone(), "local_inference" => true}));
+        let memory = memory_status(body.get("memory"));
+        self.agent_seen.insert(agent_id.into(), (now(), obj! {"model_digest" => body.get("digest").clone(), "runtime" => body.get("runtime").clone(), "local_inference" => true, "memory" => memory.clone()}));
+        if self.memory_required && !memory.get("ready").boolean() {
+            return Ok(obj! {"ok" => true, "job" => Json::Null});
+        }
         self.tick()?;
         if self
             .jobs
@@ -710,8 +721,28 @@ impl Chat {
         job.set("lease_until", now() + 150);
         job.set("attempt", job.get("attempt").number() + 1);
         job.set("digest", body.get("digest").clone());
+        job.set("memory_required", self.memory_required);
         self.commit(obj! {"type" => "job", "job" => job.clone()})?;
         Ok(obj! {"ok" => true, "job" => job})
+    }
+    pub fn memory_feed(&self, body: &Json) -> Result<Json, String> {
+        self.authorize_worker(body)?;
+        self.store.as_ref().ok_or("Store unavailable")?.memory_page(body.get("after").number(), |record| {
+            if record.get("type").text() == "profile" {
+                return obj! {"type" => "profile", "profile" => public_profile(record.get("profile"))};
+            }
+            let msg = record.get("message");
+            if !matches!(record.get("type").text(), "message" | "result") || *msg == Json::Null {
+                return Json::Null;
+            }
+            // Explicit projection: adding a private field to the journal must not
+            // silently add it to the memory protocol.
+            let mut public = Json::Object(BTreeMap::new());
+            for field in ["id", "room", "timestamp_secs", "sender_handle", "sender_name", "sender_kind", "text", "origin", "model", "model_digest", "runtime", "personality_revision", "reply_to"] {
+                public.set(field, msg.get(field).clone());
+            }
+            obj! {"type" => "message", "message" => public, "requester" => record.get("job").get("requester").clone(), "agent" => record.get("job").get("agent").clone()}
+        })
     }
     pub fn result(&mut self, body: &Json) -> Result<Json, String> {
         self.authorize_worker(body)?;
@@ -743,6 +774,10 @@ impl Chat {
         {
             return Err("Reply provenance mismatch".into());
         }
+        let memory = memory_receipt(body.get("memory"), &job)?;
+        if job.get("memory_required").boolean() && memory == Json::Null {
+            return Err("Reply requires native MEM8 evidence".into());
+        }
         let agent = self
             .agents
             .iter()
@@ -760,7 +795,7 @@ impl Chat {
             Json::Null
         } else {
             obj! {
-                "id" => self.next_id, "timestamp_secs" => now(), "room" => job.get("room").clone(), "sender_handle" => format!("{}@8c.is",agent.get("id").text()), "sender_name" => agent.get("name").clone(), "sender_kind" => "aye", "text" => text, "origin" => "local-worker", "model" => job.get("model").clone(), "model_digest" => body.get("digest").clone(), "runtime" => agent.get("runtime").clone(), "personality_revision" => job.get("personality_revision").clone(), "reply_to" => job.get("parent_id").clone(), "elapsed_ms" => body.get("elapsed_ms").number(), "output_tokens" => body.get("output_tokens").number(), "job_id" => id
+                "id" => self.next_id, "timestamp_secs" => now(), "room" => job.get("room").clone(), "sender_handle" => format!("{}@8c.is",agent.get("id").text()), "sender_name" => agent.get("name").clone(), "sender_kind" => "aye", "text" => text, "origin" => "local-worker", "model" => job.get("model").clone(), "model_digest" => body.get("digest").clone(), "runtime" => agent.get("runtime").clone(), "personality_revision" => job.get("personality_revision").clone(), "reply_to" => job.get("parent_id").clone(), "elapsed_ms" => body.get("elapsed_ms").number(), "output_tokens" => body.get("output_tokens").number(), "job_id" => id, "memory" => memory
             }
         };
         self.commit(obj! {"type" => "result", "message" => message.clone(), "job" => job})?;
@@ -770,6 +805,72 @@ impl Chat {
 
 fn valid_digest(digest: &str) -> bool {
     digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn memory_status(value: &Json) -> Json {
+    if value.get("format").text() != "MEM8EV02" || !valid_digest(value.get("binary_sha256").text())
+    {
+        return obj! {"ready" => false};
+    }
+    obj! {"ready" => value.get("ready").boolean(), "format" => "MEM8EV02", "backend" => "aurora", "binary_sha256" => value.get("binary_sha256").clone(), "family_seed" => "8b-is-family-seed-v1"}
+}
+
+fn memory_receipt(value: &Json, job: &Json) -> Result<Json, String> {
+    if *value == Json::Null {
+        return Ok(Json::Null);
+    }
+    let mut receipt = memory_status(value);
+    if !receipt.get("ready").boolean() {
+        return Err("Invalid memory receipt".into());
+    }
+    let own = format!("agent:{}", job.get("agent").text());
+    let scopes = [
+        "family".to_string(),
+        own.clone(),
+        format!("room:{}", job.get("room").text()),
+        format!("visitor:{}", job.get("requester").text()),
+    ];
+    let records = value.get("records").rows();
+    if records.is_empty()
+        || records.len() > 12
+        || !records.iter().any(|r| r.get("scope").text() == "family")
+        || !records.iter().any(|r| r.get("scope").text() == own)
+    {
+        return Err("Missing shared or individual memory evidence".into());
+    }
+    let reference = |r: &Json| -> Result<Json, String> {
+        if !scopes.iter().any(|s| s == r.get("scope").text())
+            || r.get("event_id").number() != 1
+            || !valid_digest(r.get("ref").text())
+            || !valid_digest(r.get("payload_sha256").text())
+        {
+            return Err("Invalid memory reference/scope".into());
+        }
+        Ok(
+            obj! {"scope" => r.get("scope").clone(), "ref" => r.get("ref").clone(), "event_id" => 1u64, "payload_sha256" => r.get("payload_sha256").clone()},
+        )
+    };
+    let mut recalled = Vec::new();
+    for record in records {
+        let mut r = reference(record)?;
+        if !valid_digest(record.get("snippet_sha256").text())
+            || record.get("bytes").number() == 0
+            || record.get("bytes").number() > 8192
+        {
+            return Err("Invalid recalled snippet".into());
+        }
+        r.set("snippet_sha256", record.get("snippet_sha256").clone());
+        r.set("bytes", record.get("bytes").clone());
+        recalled.push(r);
+    }
+    let written = reference(value.get("written"))?;
+    if written.get("scope").text() != own {
+        return Err("Reply must be saved in its own memory".into());
+    }
+    receipt.set("records", recalled);
+    receipt.set("written", written);
+    receipt.set("cursor", value.get("cursor").number());
+    Ok(receipt)
 }
 
 #[cfg(test)]
@@ -805,14 +906,106 @@ mod tests {
         obj! {"token" => p.get("token").clone(), "room" => "humayian-lounge", "text" => "Hello Aye 💙", "client_id" => id, "agent" => "aye"}
     }
     fn worker(agent: &str) -> Json {
-        obj! {"worker_key" => KEY, "agent" => agent, "runtime" => "ollama", "model" => if agent=="aye" {"aye-deepseek-pqm:latest"} else {"cheet-deepseek-v2:16b"}, "digest" => "a".repeat(64)}
+        obj! {"worker_key" => KEY, "agent" => agent, "runtime" => "ollama", "model" => if agent=="aye" {"aye-deepseek-pqm:latest"} else {"cheet-deepseek-v2:16b"}, "digest" => "a".repeat(64), "memory" => obj! {"ready" => true, "format" => "MEM8EV02", "binary_sha256" => "b".repeat(64)}}
     }
     fn answer(job: &Json) -> Json {
         let mut result = worker(job.get("agent").text());
         result.set("id", job.get("id").clone());
         result.set("lease", job.get("lease").clone());
         result.set("text", "Hello, Éva. Tell me about your boats.");
+        let reference = |scope: &str| obj! {"scope" => scope, "ref" => "c".repeat(64), "payload_sha256" => "d".repeat(64), "event_id" => 1u64, "snippet_sha256" => "e".repeat(64), "bytes" => 10u64};
+        let own = format!("agent:{}", job.get("agent").text());
+        let mut memory = result.get("memory").clone();
+        memory.set("records", vec![reference("family"), reference(&own)]);
+        memory.set("written", reference(&own));
+        result.set("memory", memory);
         result
+    }
+    #[test]
+    fn memory_feed_is_authenticated_replayable_and_strips_secrets_after_ring_eviction() {
+        let f = Fixture::new();
+        let mut chat = f.open();
+        let p = intro(&mut chat);
+        assert!(chat.memory_feed(&obj! {"after" => 0u64}).is_err());
+        for i in 0..70 {
+            chat.rates.clear();
+            let mut request = note(&p, &format!("memory-{i:08}"));
+            request.set("ask_aye", "no");
+            chat.post(&request).unwrap();
+        }
+        assert_eq!(chat.messages["humayian-lounge"].len(), RECENT);
+        let mut cursor = 0;
+        let mut messages = 0;
+        let mut source = String::new();
+        loop {
+            let body = obj! {"worker_key" => KEY, "after" => cursor};
+            let page = chat.memory_feed(&body).unwrap();
+            assert_eq!(page, chat.memory_feed(&body).unwrap());
+            let raw = page.encode();
+            for secret in [
+                KEY,
+                p.get("token").text(),
+                "client_id",
+                "system",
+                "lease",
+                "memory-00000000",
+            ] {
+                assert!(!raw.contains(secret));
+            }
+            messages += page
+                .get("events")
+                .rows()
+                .iter()
+                .filter(|r| r.get("event").get("type").text() == "message")
+                .count();
+            cursor = page.get("next").number();
+            if source.is_empty() {
+                source = page.get("source").text().into();
+            }
+            assert_eq!(page.get("source").text(), source);
+            if page.get("caught_up").boolean() {
+                break;
+            }
+        }
+        assert_eq!(messages, 70);
+        assert!(chat
+            .memory_feed(&obj! {"worker_key" => KEY, "after" => 1u64})
+            .is_err());
+        drop(chat);
+        let chat = f.open();
+        let page = chat
+            .memory_feed(&obj! {"worker_key" => KEY, "after" => cursor})
+            .unwrap();
+        assert_eq!(page.get("source").text(), source);
+        assert!(page.get("caught_up").boolean());
+        assert!(page.get("events").rows().is_empty());
+    }
+    #[test]
+    fn required_memory_blocks_unready_workers_and_rejects_wrong_individual_scope() {
+        let f = Fixture::new();
+        let mut chat = f.open();
+        let p = intro(&mut chat);
+        chat.post(&note(&p, "memory-scope-0001")).unwrap();
+        let mut proof = worker("aye");
+        proof.set("memory", Json::Null);
+        assert_eq!(*chat.poll(&proof).unwrap().get("job"), Json::Null);
+        assert!(!chat.agents_public()[0].get("online").boolean());
+        let job = chat.poll(&worker("aye")).unwrap().get("job").clone();
+        let mut reply = answer(&job);
+        reply.set("memory", Json::Null);
+        assert!(chat.result(&reply).is_err());
+        let mut reply = answer(&job);
+        let mut memory = reply.get("memory").clone();
+        let mut records = memory.get("records").rows().to_vec();
+        records[1].set("scope", "agent:cheet");
+        memory.set("records", records);
+        reply.set("memory", memory);
+        assert!(chat.result(&reply).is_err());
+        let result = chat.result(&answer(&job)).unwrap();
+        assert_eq!(
+            result.get("message").get("memory").get("format").text(),
+            "MEM8EV02"
+        );
     }
     #[test]
     fn profile_message_and_pending_reply_survive_restart_without_duplicates() {

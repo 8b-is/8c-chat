@@ -102,7 +102,9 @@ async function run() {
     await a.locator('[data-room="aye-partner"]').click(); await a.locator("#ayeMode").selectOption("aye");
     await a.locator("#msgInput").fill("Exercise queued reply and retry controls"); await a.locator("#sendBtn").click();
     await a.getByText("Aye: queued for the local model…",{exact:true}).waitFor();
-    const proof={worker_key:key,agent:"aye",runtime:"ollama",model:"aye-deepseek-pqm:latest",digest:"a".repeat(64)};
+    const ref=scope=>({scope,ref:"c".repeat(64),event_id:1,payload_sha256:"d".repeat(64),snippet_sha256:"e".repeat(64),bytes:10});
+    const memory={ready:true,format:"MEM8EV02",binary_sha256:"b".repeat(64),records:[ref("family"),ref("agent:aye")],written:ref("agent:aye")};
+    const proof={worker_key:key,agent:"aye",runtime:"ollama",model:"aye-deepseek-pqm:latest",digest:"a".repeat(64),memory};
     const post = async (url,data) => (await fetch(origin+url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)})).json();
     let job=(await post("/api/worker/poll",proof)).job;
     await post("/api/worker/result",{...proof,id:job.id,lease:job.lease,error:"Test runtime interruption"});
@@ -111,6 +113,9 @@ async function run() {
     assert.ok(job);
     await post("/api/worker/result",{...proof,id:job.id,lease:job.lease,text:"Browser test reply, not an inference claim",elapsed_ms:10,output_tokens:8});
     await a.getByText("Browser test reply, not an inference claim",{exact:true}).waitFor();
+    await a.locator("article .provenance summary").click();
+    await a.getByText(/Aurora MEM8EV02/).waitFor();
+    assert.match(await a.locator(".memory-receipt").textContent(),/family.*agent:aye/);
     await a.screenshot({path:path.join(directory,"desktop.png")}); await b.screenshot({path:path.join(directory,"mobile.png")});
     assert.deepEqual(errors,[]);
     console.log("PASS: two visitors, restored identity/introduction, mobile layout, lost-ack retry, newer draft preservation, per-room drafts, favorites, stale polls, hot-tub pause, queued reply retry.");

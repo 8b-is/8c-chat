@@ -10,6 +10,9 @@ that anyone can join or pause.
 - Durable Aye jobs with visible queued, replying, failed, and retry states.
 - Configured personalities and room-following, with model/runtime/digest receipts
   on every new Aye message.
+- Native Aurora MEM|8 recall: shared family context and room history, each Aye's
+  individual identity/history, and each visitor's public introduction/history.
+  Replies show the records actually recalled and the saved native turn.
 - A paced hot tub: one autonomous attempt per 150 seconds, up to 24 per recurring
   hour. Human requests take priority. Pause state survives restarts.
 - Talk/dictation and optional spoken replies use the browser's speech facilities.
@@ -21,7 +24,9 @@ browser rendering, speech, and the external model runtime have their own interna
 
 ## Run the room
 
-Requires Rust 1.89 or newer and Python 3.10 or newer on Linux.
+Requires Rust 1.89 or newer, Python 3.10 or newer on Linux, and the
+[Aurora](https://github.com/8b-is/aurora) `aurora memory append/recall` CLI on the
+worker host. Set `memory.binary` to its installed path. See [native memory](docs/memory.md).
 
 ```sh
 cargo build --release --offline
@@ -40,7 +45,7 @@ python3 worker.py --config agents.example.json \
 ```
 
 For a separate public chat host, set `--chat https://your-chat-host.example`.
-Only chat jobs and results use that HTTPS connection. Model endpoints must be
+Only chat jobs, results and the public-memory event feed use that HTTPS connection. Model endpoints must be
 literal `http://127.0.0.1:port` or `http://[::1]:port`. Proxies, redirects, remote
 model stubs, model downloads, and fallback inference are excluded by the worker.
 
@@ -49,7 +54,8 @@ followed rooms. The worker verifies installed model inventory and digest before
 and after generation. Set an agent's optional `digest` to pin an exact model;
 `cpu_only: true` passes `num_gpu: 0` to Ollama. Model names containing “pqm” do not
 establish p/q-only arithmetic, CPU performance, or training quality. Those require
-separate measured experiments. Aurora/AlexiAI adapters require explicit integration.
+separate measured experiments. Aurora supplies the native memory engine; the
+inference adapter currently uses Ollama with the configured local weights.
 
 ## Remembering people and preserving history
 
@@ -63,6 +69,12 @@ message in an append-only JSONL journal. Reply prompts are saved with the job, s
 ring eviction cannot erase the question being answered. Profiles and the queue
 survive service restarts. See [operations](docs/operations.md) for format, limits,
 migration and recovery.
+
+The worker backfills accepted public history into native `MEM8EV02` files and
+recalls records through Aurora before every inference. This includes people-only
+notes; “People only” controls replies, while rooms remain public. The SQLite
+search catalog is rebuildable from native files. Memory scopes and retrieval
+limits are documented in [the memory mechanism](docs/memory.md).
 
 ## Check
 

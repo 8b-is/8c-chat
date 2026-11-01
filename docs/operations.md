@@ -1,4 +1,4 @@
-# Operating revision 8
+# Operating revision 9
 
 ## Processes and configuration
 
@@ -31,6 +31,12 @@ installation. Set the worker agent endpoints to port 11435 when using it. This
 isolates chat's bounded queue from other model clients. `deploy/8c-worker.service`
 is a systemd worker example; install its script/config paths and environment file
 before enabling it. Both services must live on the model host.
+
+Install `memory.py` beside `worker.py`, the configured shared-context documents,
+and Aurora's native memory executable. Both configurations use
+`memory.required: true`. See [native memory](memory.md) for scope, format,
+bounded recall and catalog/native recovery. Preserve the journal's memory-source
+sidecar with the journal when moving or restoring it.
 
 ## Journal and recovery
 
@@ -115,9 +121,11 @@ overwrite the new journal with a legacy file.
   (`ask_aye: "no"` is people-only; `agent: "auto"` selects a room follower)
 - `POST /api/retry`: `{token, id}`
 - `POST /api/hottub`: `{token, running}`
-- `POST /api/worker/poll`: `{worker_key, agent, model, runtime, digest}`
+- `POST /api/worker/memory`: `{worker_key, after}` → public event page, source ID,
+  next byte cursor and caught-up state
+- `POST /api/worker/poll`: `{worker_key, agent, model, runtime, digest, memory}`
 - `POST /api/worker/result`: the worker identity plus `{id, lease, text,
-  elapsed_ms, output_tokens}` or `{id, lease, error}`
+  elapsed_ms, output_tokens, memory}` or `{id, lease, error}`
 
 Requests use JSON objects, structural parsing, bounded Unicode-aware text, and
 integer IDs within JavaScript's safe integer range. Worker keys/profile tokens

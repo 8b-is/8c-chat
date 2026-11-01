@@ -17,6 +17,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from memory import Memory, MemoryFault
 
 LIMIT = 1_048_576
 
@@ -90,7 +91,7 @@ def infer(agent, job):
     digest = inventory(agent)
     if job["digest"] != digest or job["model"] != agent["model"] or job["runtime"] != agent["runtime"] or job["agent"] != agent["id"]:
         raise ValueError("Job/model provenance mismatch")
-    options = {"num_predict": 256, "num_ctx": 4096}
+    options = {"num_predict": 256, "num_ctx": 8192}
     if agent.get("cpu_only"):
         options["num_gpu"] = 0
     start = time.monotonic_ns()
@@ -155,13 +156,24 @@ def deliver(origin, key, pending):
     return True
 
 
+def sync_memory(memory, origin, key):
+    # Bounded catch-up; no job is claimed until the feed has reached its head.
+    for _ in range(64):
+        page = request(origin, "/api/worker/memory", {"worker_key": key, "after": memory.cursor})
+        memory.ingest(page)
+        if page.get("caught_up"):
+            return True
+    return False
+
+
 def work(config, origin, directory):
     os.umask(0o077)
     origin = endpoint(origin)
     key = os.environ.get("WORKER_KEY", "")
     if len(key) < 32:
         raise ValueError("WORKER_KEY must contain at least 32 characters")
-    agents = json.loads(Path(config).read_text())["agents"]
+    configuration = json.loads(Path(config).read_text())
+    agents = configuration["agents"]
     if not 1 <= len(agents) <= 16:
         raise ValueError("Configure 1–16 agents")
     for agent in agents:
@@ -172,6 +184,7 @@ def work(config, origin, directory):
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / "worker.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        memory = Memory(directory / "mem8", configuration["memory"], agents, Path(config).resolve().parent)
         pending = directory / "pending-result.json"
         inventory_cache = {}
         while True:
@@ -180,25 +193,36 @@ def work(config, origin, directory):
                     if not deliver(origin, key, pending):
                         time.sleep(3)
                         continue
+                if not sync_memory(memory, origin, key):
+                    continue
                 for agent in agents:
                     try:
                         cached = inventory_cache.get(agent["id"])
                         if cached is None or time.monotonic_ns() - cached[0] > 60_000_000_000:
                             cached = (time.monotonic_ns(), inventory(agent))
                             inventory_cache[agent["id"]] = cached
-                        proof = {"agent": agent["id"], "model": agent["model"], "runtime": agent["runtime"], "digest": cached[1]}
+                        proof = {"agent": agent["id"], "model": agent["model"], "runtime": agent["runtime"], "digest": cached[1], "memory": memory.status()}
                         reply = request(origin, "/api/worker/poll", {**proof, "worker_key": key})
                         job = reply.get("job")
                         if not reply.get("ok") or not job:
                             continue
                         result = {**proof, "id": job["id"], "lease": job["lease"]}
                         try:
+                            # A request may have arrived after the preceding feed page.
+                            if not sync_memory(memory, origin, key):
+                                raise MemoryFault("Memory catch-up exceeded this turn's budget")
+                            prepared, receipt = memory.prepare(job)
                             # A separate bounded subprocess gives inference a whole-operation deadline,
                             # including inventory, connection, and response reading.
                             child = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--infer"],
-                                input=json.dumps({"agent": agent, "job": job}), text=True,
+                                input=json.dumps({"agent": agent, "job": prepared}), text=True,
                                 capture_output=True, timeout=115, check=True)
                             result.update(json.loads(child.stdout))
+                            receipt["written"] = memory.remember_generation(agent, job, result, receipt)
+                            result["memory"] = receipt
+                        except MemoryFault:
+                            result["error"] = "Native MEM|8 could not be verified. Your message is saved; please retry after memory recovery."
+                            request(origin, "/api/worker/poll", {**proof, "memory": memory.status(False), "worker_key": key})
                         except subprocess.TimeoutExpired:
                             result["error"] = "Local inference exceeded its 115-second deadline. Please retry."
                         except (subprocess.CalledProcessError, ValueError):
@@ -209,6 +233,16 @@ def work(config, origin, directory):
                     except (OSError, ValueError, KeyError) as error:
                         # Log only the error class: URLs/response text may contain private context.
                         print(f"Worker {agent['id']}: {type(error).__name__}; retrying", flush=True)
+                time.sleep(3)
+            except MemoryFault:
+                for agent in agents:
+                    cached = inventory_cache.get(agent["id"])
+                    if cached:
+                        try:
+                            request(origin, "/api/worker/poll", {"worker_key": key, "agent": agent["id"], "model": agent["model"], "runtime": agent["runtime"], "digest": cached[1], "memory": memory.status(False)})
+                        except (OSError, ValueError):
+                            pass
+                print("Native MEM8 unavailable; retaining source and retrying", flush=True)
                 time.sleep(3)
             except (OSError, ValueError) as error:
                 print(f"Worker transport: {type(error).__name__}; retaining result", flush=True)

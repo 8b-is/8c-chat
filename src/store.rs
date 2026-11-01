@@ -8,6 +8,7 @@ use std::path::Path;
 pub struct Store {
     file: File,
     poisoned: Cell<bool>,
+    source: String,
 }
 impl Store {
     pub fn open(
@@ -61,10 +62,93 @@ impl Store {
                 replay(json::parse(line).map_err(|e| format!("journal record {count}: {e}"))?)?;
             }
         }
+        // Separate from the delivery journal so revision-8 recovery can still replay it.
+        let source_path = path.with_extension("memory-source");
+        if !source_path.exists() {
+            let temporary = source_path.with_extension(format!("{}.new", random_id()?));
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut source_file = options.open(&temporary).map_err(|e| e.to_string())?;
+            source_file
+                .write_all(random_id()?.as_bytes())
+                .and_then(|_| source_file.sync_all())
+                .map_err(|e| e.to_string())?;
+            fs::rename(temporary, &source_path).map_err(|e| e.to_string())?;
+            File::open(
+                source_path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new(".")),
+            )
+            .and_then(|f| f.sync_all())
+            .map_err(|e| e.to_string())?;
+        }
+        let mut source = String::new();
+        File::open(&source_path)
+            .and_then(|f| f.take(49).read_to_string(&mut source))
+            .map_err(|e| e.to_string())?;
+        if source.len() != 48 || !source.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("Invalid memory source identity; original retained".into());
+        }
         Ok(Self {
             file,
             poisoned: Cell::new(false),
+            source,
         })
+    }
+    /// Byte-cursor replay, bounded to 16 journal records per call. Projection happens
+    /// in Chat so credentials, job prompts, leases and client IDs never leave here.
+    pub fn memory_page(&self, cursor: u64, project: impl Fn(Json) -> Json) -> Result<Json, String> {
+        let mut file = &self.file;
+        let end = file.metadata().map_err(|e| e.to_string())?.len();
+        if cursor > end {
+            return Err("Memory cursor exceeds journal; recovery required".into());
+        }
+        if cursor > 0 {
+            file.seek(SeekFrom::Start(cursor - 1))
+                .map_err(|e| e.to_string())?;
+            let mut previous = [0];
+            file.read_exact(&mut previous).map_err(|e| e.to_string())?;
+            if previous != *b"\n" {
+                return Err("Memory cursor is not a record boundary".into());
+            }
+        }
+        file.seek(SeekFrom::Start(cursor))
+            .map_err(|e| e.to_string())?;
+        let mut reader = BufReader::new(file);
+        let mut next = cursor;
+        let mut events = Vec::new();
+        for _ in 0..16 {
+            let mut line = Vec::new();
+            let size = reader
+                .by_ref()
+                .take(131_073)
+                .read_until(b'\n', &mut line)
+                .map_err(|e| e.to_string())?;
+            if size == 0 {
+                break;
+            }
+            if size > 131_072 || !line.ends_with(b"\n") {
+                return Err("Journal needs recovery".into());
+            }
+            next = next
+                .checked_add(size as u64)
+                .ok_or("Memory cursor overflow")?;
+            let event = project(json::parse(
+                std::str::from_utf8(&line).map_err(|e| e.to_string())?,
+            )?);
+            if event != Json::Null {
+                events.push(crate::obj! {"cursor" => next, "event" => event});
+            }
+        }
+        Ok(
+            crate::obj! {"ok" => true, "source" => self.source.clone(), "after" => cursor, "next" => next, "caught_up" => next == end, "events" => events},
+        )
     }
     pub fn append(&self, value: &Json) -> Result<(), String> {
         let mut bytes = value.encode().into_bytes();
@@ -134,11 +218,13 @@ mod tests {
         let store = Store {
             file: File::open(&path).unwrap(),
             poisoned: Cell::new(false),
+            source: String::new(),
         };
         assert!(store.append(&crate::obj! {"type" => "another"}).is_err());
         assert_eq!(fs::read(&path).unwrap(), original);
         assert!(store.append(&crate::obj! {"type" => "again"}).is_err());
         drop(store);
+        fs::remove_file(path.with_extension("memory-source")).unwrap();
         fs::remove_file(path).unwrap();
     }
 }

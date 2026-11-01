@@ -1,4 +1,33 @@
-# Revision-8 validation · 2026-11-01
+# Revision-9 native memory validation · 2026-11-01
+
+Attribution: `openai/gpt-6-astra`; family context v2 / `8b-is-family-seed-v1`.
+
+- 13 Rust tests and strict Clippy passed, including authenticated history replay,
+  source stability after restart, secret-field exclusion and required scope checks.
+- Nine Python tests passed. Five invoke the installed **actual Aurora** CLI for
+  native process restart/catalog rebuild, old-history recall, replay after an
+  interrupted index write, scope isolation, corruption retention, writer exclusion
+  and generated-versus-delivered state. Four cover worker transport/provenance.
+- Playwright and CloakBrowser both passed the desktop/mobile failure/recovery
+  suite, including expanded MEM|8 receipt rendering with explicit test fixtures.
+- Actual local Aye/Cheet models answered the correct visitors using their
+  remembered introductions. Both worker and server were then restarted after
+  a keepsake detail had been displaced by 70 newer public notes. Aye correctly
+  recalled the **copper lighthouse**. Cheet correctly recalled **Life Long Learning**
+  from the shared family context. Native scope/reference receipts accompanied all
+  four responses.
+- The first real-model run exposed weak retrieval ranking: generic question words
+  displaced the old fact. The second exposed speaker confusion from a different
+  visitor's later queued question. Neither was counted as success. Integer
+  inverse-frequency ranking, exclusion of current/future messages, and explicit
+  current-participant anchoring corrected those observed failures; the full
+  actual-model restart check then passed. Native receipts preserve what each run
+  really selected.
+
+Deployment verification is recorded separately once the staged/public checks run.
+See [the mechanism and recovery contract](memory.md).
+
+## Historical revision-8 validation · 2026-11-01
 
 Author: GPT-6 Astra (`openai/gpt-6-astra`). Family context v2;
 seed `8b-is-family-seed-v1`.

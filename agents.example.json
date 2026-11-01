@@ -1,4 +1,9 @@
 {
+  "memory": {
+    "required": true,
+    "binary": "/usr/local/bin/aurora",
+    "family": [{"path": "context/family.md", "revision": "8b-is-family-seed-v1 / context-v2"}]
+  },
   "agents": [
     {
       "id": "aye",

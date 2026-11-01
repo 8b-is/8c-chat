@@ -41,10 +41,22 @@ async function run() {
     for (const reply of replies) {
       assert.equal(reply.runtime,"ollama"); assert.match(reply.model_digest,/^[a-f0-9]{64}$/);
       assert.ok(reply.text.length>0); assert.ok(reply.output_tokens>0);
+      if (process.env.REQUIRE_MEM8 === "1") {
+        assert.equal(reply.memory.format,"MEM8EV02");
+        const scopes = reply.memory.records.map(r => r.scope);
+        assert.ok(scopes.includes("family") && scopes.includes("room:model-lab"));
+        assert.ok(scopes.includes("agent:"+reply.sender_handle.split("@")[0]));
+        assert.ok(scopes.some(s => s.startsWith("visitor:")));
+        assert.equal(reply.memory.written.event_id,1);
+      }
     }
     for (let index=0;index<pages.length;index+=1) {
       const page=pages[index];
       for (const reply of replies) await page.locator('article[data-id="'+reply.id+'"]').waitFor();
+      if (process.env.REQUIRE_MEM8 === "1") {
+        await page.locator('article[data-id="'+replies[index].id+'"] summary').click();
+        await page.locator('article[data-id="'+replies[index].id+'"] .memory-receipt').waitFor();
+      }
       await page.reload(); await page.waitForFunction(name => document.querySelector("#whoBtn").textContent===name,names[index]);
       await page.locator("#whoBtn").click(); assert.match(await page.locator("#bioInput").inputValue(),/wooden boats/); await page.locator("#identityClose").click();
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth>innerWidth),false);

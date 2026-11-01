@@ -104,6 +104,10 @@
       const info = document.createElement("p"); info.textContent = agent.runtime + " · " + agent.model;
       const follows = document.createElement("p"); follows.textContent = agent.rooms.map(id => rooms.find(r => r.id === id)?.name || id).join(" · ");
       box.append(name, info, follows); el("agentList").append(box);
+      const memory = document.createElement("p");
+      memory.className = "memory-status";
+      memory.textContent = agent.evidence?.memory?.ready ? "MEM|8 · shared family + individual memory" : "MEM|8 awaiting verified connection";
+      box.append(memory);
     }
     el("ayeMode").add(new Option("People only", "no"));
     if ([...el("ayeMode").options].some(o => o.value === previous)) el("ayeMode").value = previous;
@@ -124,10 +128,17 @@
     node.append(head, text);
     if (note.origin === "local-worker") {
       const details = document.createElement("details"); details.className = "provenance quiet";
-      const title = document.createElement("summary"); title.textContent = "Local · " + note.model;
+      const title = document.createElement("summary"); title.textContent = "Local · " + note.model + (note.memory?.ready ? " · MEM|8" : "");
       const proof = document.createElement("p");
       proof.textContent = note.runtime + " · " + note.personality_revision + " · " + note.elapsed_ms + " ms · " + note.output_tokens + " tokens · digest " + note.model_digest;
       details.append(title, proof); node.append(details);
+      if (note.memory?.ready) {
+        const memory = document.createElement("p"); memory.className = "memory-receipt";
+        memory.textContent = "Aurora " + note.memory.format + " · " + note.memory.family_seed + " · Recalled: " + [...new Set(note.memory.records.map(r => r.scope))].join(" · ");
+        const refs = document.createElement("p");
+        refs.textContent = note.memory.records.map(r => r.scope + " #" + r.ref + ":" + r.event_id).join(" · ") + " · Saved turn #" + note.memory.written.ref + ":" + note.memory.written.event_id;
+        details.append(memory, refs);
+      }
     }
     return node;
   }

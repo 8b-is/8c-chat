@@ -196,6 +196,7 @@ pub fn dispatch(state: &Mutex<Chat>, req: &Request) -> Response {
             "/api/hottub" => chat.set_tub(&body),
             "/api/worker/poll" => chat.poll(&body),
             "/api/worker/result" => chat.result(&body),
+            "/api/worker/memory" => chat.memory_feed(&body),
             "/api/harmony/handshake" => {
                 return error(
                     409,
