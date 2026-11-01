@@ -218,6 +218,8 @@ def agy(agent, prompt):
         'command(/usr/local/libexec/8c-run)',
         'command(/usr/local/bin/st)',
         'command(/usr/local/bin/g8t-mcp)',
+        'command(/usr/local/bin/g8t-worktree)',
+        'command(/usr/local/bin/8c-self-deploy)',
         'command(/usr/local/bin/cloak-browse)',
         'mcp(smart-tree:*)',
         'mcp(g8t:*)',
