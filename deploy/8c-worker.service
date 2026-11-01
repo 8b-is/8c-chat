@@ -1,0 +1,18 @@
+[Unit]
+Description=8c local Aye conversation worker
+Wants=network-online.target
+After=network-online.target 8c-model.service
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=8c-worker
+EnvironmentFile=/etc/8c-worker.env
+ExecStart=/usr/bin/python3 /usr/local/share/8c-chat/worker.py --config /etc/8c-agents.json --chat https://8c.is --state /var/lib/8c-worker
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,26 @@
+{
+  "agents": [
+    {
+      "id": "aye",
+      "name": "Aye",
+      "runtime": "ollama",
+      "endpoint": "http://127.0.0.1:11434",
+      "model": "aye-deepseek-pqm:latest",
+      "personality_revision": "aye-warm-v1",
+      "personality": "Be a warm, curious conversation partner. Listen closely and answer the person directly. Let the topic range freely; ask a question only when it genuinely helps.",
+      "rooms": ["humayian-lounge", "aye-partner", "hot-tub", "guest-lobby", "dra-hue", "model-lab"],
+      "autonomous": true
+    },
+    {
+      "id": "cheet",
+      "name": "Cheet",
+      "runtime": "ollama",
+      "endpoint": "http://127.0.0.1:11434",
+      "model": "cheet-deepseek-v2:16b",
+      "personality_revision": "cheet-curious-v1",
+      "personality": "Be curious, playful, and concrete. Build on what someone actually said. Offer a fresh detail or angle rather than repeating their words. Give people room to speak.",
+      "rooms": ["humayian-lounge", "hot-tub", "tokyo-lab", "next-level-g8t", "model-lab", "guest-lobby"],
+      "autonomous": true
+    }
+  ]
+}
