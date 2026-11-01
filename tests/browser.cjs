@@ -44,7 +44,7 @@ async function run() {
     await b.getByText("Hello from the desktop 💙",{exact:true}).waitFor();
     await b.locator("#msgInput").fill("Hello back from mobile"); await b.locator("#sendBtn").click();
     await a.getByText("Hello back from mobile",{exact:true}).waitFor();
-    assert.equal(await b.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, "mobile must not overflow horizontally");
+    assert.ok(await b.evaluate(() => document.documentElement.scrollWidth <= 390), "mobile content must not expand the viewport");
 
     // Lost acknowledgement: the server accepts a note, the browser sees a failed fetch.
     let loseAck = true;
@@ -117,8 +117,40 @@ async function run() {
     await a.getByText(/Aurora MEM8EV02/).waitFor();
     assert.match(await a.locator(".memory-receipt").textContent(),/family.*agent:aye/);
     await a.screenshot({path:path.join(directory,"desktop.png")}); await b.screenshot({path:path.join(directory,"mobile.png")});
+
+    // A delayed profile update must not restore someone who has signed out.
+    let releaseProfile, profileIntercepted;
+    const profileReceived = new Promise(resolve => profileIntercepted=resolve);
+    const profileGate = new Promise(resolve => releaseProfile=resolve);
+    await a.route("**/api/profile", async route => {
+      const response = await route.fetch(); profileIntercepted(); await profileGate;
+      await route.fulfill({response});
+    });
+    await a.locator("#favoriteBtn").click(); await profileReceived;
+    await a.locator("#whoBtn").click(); await a.locator("#switchPerson").click();
+    await a.locator("#nameInput").fill("Replacement visitor"); await a.locator("#identitySave").click();
+    await a.waitForFunction(() => !document.querySelector("#whoSheet").open);
+    releaseProfile();
+    await a.waitForFunction(() => !document.querySelector("#favoriteBtn").disabled);
+    assert.equal(await a.locator("#whoBtn").textContent(), "Replacement visitor", "late profile updates must not replace the current person");
+    await a.unroute("**/api/profile");
+
+    // The maximum accepted name must still fit a narrow phone screen.
+    await b.locator("#whoBtn").click(); await b.locator("#switchPerson").click();
+    await b.locator("#nameInput").fill("W".repeat(48)); await b.locator("#identitySave").click();
+    await b.waitForFunction(() => !document.querySelector("#whoSheet").open);
+    await b.setViewportSize({width:320,height:844});
+    await b.locator("#ayeMode").selectOption("no");
+    await b.locator("#msgInput").fill("A message with a maximum-length author name"); await b.locator("#sendBtn").click();
+    await b.getByText("A message with a maximum-length author name", {exact:true}).waitFor();
+    assert.ok(await b.evaluate(() => document.documentElement.scrollWidth <= 320), "long names must not expand a phone viewport");
+    assert.ok(await b.locator("#messages").evaluate(box => box.scrollWidth <= box.clientWidth), "long author names must not create sideways message scrolling");
+    await b.screenshot({path:path.join(directory,"mobile-long-author.png")});
+    await b.locator('[data-room="aye-partner"]').click();
+    assert.ok(await b.evaluate(() => document.documentElement.scrollWidth <= 320), "long room titles and names must fit together");
+    await b.screenshot({path:path.join(directory,"mobile-long-name.png")});
     assert.deepEqual(errors,[]);
-    console.log("PASS: two visitors, restored identity/introduction, mobile layout, lost-ack retry, newer draft preservation, per-room drafts, favorites, stale polls, hot-tub pause, queued reply retry.");
+    console.log("PASS: two visitors, restored identity/introduction, mobile and long-name layout, lost-ack retry, newer draft preservation, per-room drafts, favorites, stale polls/profile updates, hot-tub pause, queued reply retry.");
     console.log("Browser artifacts:",directory);
   } finally { if (browser) await browser.close(); server.kill("SIGTERM"); }
 }

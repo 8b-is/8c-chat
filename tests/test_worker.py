@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import worker
 
@@ -44,6 +44,75 @@ class WorkerTests(unittest.TestCase):
             with patch.object(worker,"request",return_value={"ok":True,"duplicate":True}):
                 self.assertTrue(worker.deliver("https://8c.is","k"*32,path))
             self.assertFalse(path.exists())
+
+    def run_mocked_work(self, transport, turns=1):
+        """Exercise the real loop and spool, never an API or native/model process."""
+        class StopWork(BaseException):
+            pass
+
+        sleeps = 0
+
+        def sleep(_seconds):
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps >= turns:
+                raise StopWork()
+
+        agents = [{"id": name, "model": name + ":latest", "runtime": "ollama",
+                   "endpoint": "http://127.0.0.1:11434"} for name in ("aye", "cheet")]
+        memory = Mock()
+        memory.status.return_value = {"ready": True}
+        memory.prepare.side_effect = lambda job: (job, {})
+        memory.remember_generation.return_value = {"ref": "test-native-reference"}
+        child = Mock(stdout=json.dumps({"text": "Test reply", "digest": "a" * 64}))
+        with tempfile.TemporaryDirectory(prefix="8c-work-loop-") as directory:
+            root = Path(directory)
+            config = root / "agents.json"
+            config.write_text(json.dumps({"agents": agents, "memory": {}}))
+            with patch.dict(os.environ, {"WORKER_KEY": "k" * 32}), \
+                 patch.object(worker.os, "umask"), \
+                 patch.object(worker, "Memory", return_value=memory), \
+                 patch.object(worker, "inventory", return_value="a" * 64), \
+                 patch.object(worker, "sync_memory", return_value=True), \
+                 patch.object(worker, "request", side_effect=transport), \
+                 patch.object(worker.subprocess, "run", return_value=child), \
+                 patch.object(worker.time, "sleep", side_effect=sleep):
+                with self.assertRaises(StopWork):
+                    worker.work(config, "https://example.invalid", root / "state")
+            pending = root / "state" / "pending-result.json"
+            return json.loads(pending.read_text()) if pending.exists() else None
+
+    def test_work_retains_pending_before_polling_another_agent_on_delivery_error(self):
+        polls = []
+
+        def transport(_origin, path, body=None, **_kwargs):
+            if path == "/api/worker/poll":
+                polls.append(body["agent"])
+                return {"ok": True, "job": {"id": len(polls), "lease": "test-lease"}}
+            self.assertEqual(path, "/api/worker/result")
+            if body["id"] == 1:
+                # The server accepted this result but its acknowledgement was lost;
+                # it could grant the next lease if the worker incorrectly polled.
+                raise OSError("lost acknowledgement")
+            return {"ok": True}
+
+        pending = self.run_mocked_work(transport)
+        self.assertEqual(polls, ["aye"])
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["id"], 1)
+
+    def test_work_rotates_agents_with_continuously_queued_jobs(self):
+        polls = []
+
+        def transport(_origin, path, body=None, **_kwargs):
+            if path == "/api/worker/poll":
+                polls.append(body["agent"])
+                return {"ok": True, "job": {"id": len(polls), "lease": "test-lease"}}
+            self.assertEqual(path, "/api/worker/result")
+            return {"ok": True}
+
+        self.assertIsNone(self.run_mocked_work(transport, turns=3))
+        self.assertEqual(polls, ["aye", "cheet", "aye"])
 
     def test_reasoning_is_not_published_as_a_reply(self):
         self.assertEqual(worker.visible_text("<think>private reasoning</think> Hello"),"Hello")

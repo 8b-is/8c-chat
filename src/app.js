@@ -252,9 +252,14 @@
   el("favoriteBtn").addEventListener("click", async () => {
     if (!profile) { showIdentity(); return; }
     const favorites = profile.favorites.includes(room) ? profile.favorites.filter(id => id !== room) : [...profile.favorites, room];
+    const requestToken = token;
     el("favoriteBtn").disabled = true;
-    try { profile = (await api("/api/profile", {bio: profile.bio, favorites})).profile; identityLabels(); }
-    catch (error) { el("sendStatus").textContent = error.message; }
+    try {
+      const result = await api("/api/profile", {bio: profile.bio, favorites});
+      // Switching people while this request is in flight invalidates its UI update.
+      if (token === requestToken) { profile = result.profile; identityLabels(); }
+    }
+    catch (error) { if (token === requestToken) el("sendStatus").textContent = error.message; }
     finally { el("favoriteBtn").disabled = false; }
   });
   el("tubBtn").addEventListener("click", async () => {
