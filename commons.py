@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import resource
+import re
 import subprocess
 import sys
 import time
@@ -14,6 +15,54 @@ FILE_LIMIT = 16_384
 
 def sha(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+def exact_write_contract(query):
+    """Recognize one explicit literal-write form; never guess ambiguous bytes.
+
+    Unquoted text ends at a sentence delimiter. JSON strings preserve whitespace,
+    punctuation and escapes exactly. This restricts actions; it never authorizes
+    them. Callers must separately enforce current-request/no-action policy.
+    """
+    if not isinstance(query, str) or not re.search(r'\bcontaining\s+exactly\b', query, re.I):
+        return None
+    error = 'For an exact write, specify one relative file path and one literal; use a JSON string for punctuation or whitespace.'
+    if len(re.findall(r'\bcontaining\s+exactly\b', query, re.I)) != 1:
+        raise ValueError(error)
+    match = re.search(r'\b(?:create|write)\s+((?:artifacts|src|tests)/[^\s\"\'`]+)\s+containing\s+exactly\s+', query, re.I)
+    if not match:
+        raise ValueError(error)
+    path, rest = match[1], query[match.end():]
+    if any(part.startswith('.') for part in Path(path).parts):
+        raise ValueError(error)
+    if rest.startswith('"'):
+        try:
+            text, end = json.JSONDecoder().raw_decode(rest)
+        except ValueError:
+            raise ValueError(error) from None
+        if not isinstance(text, str):
+            raise ValueError(error)
+        suffix = rest[end:].strip()
+        if suffix.startswith('.'):
+            suffix = suffix[1:].strip()
+    else:
+        parts = re.split(r'\.(?:\s+|$)', rest, maxsplit=1)
+        text, suffix = parts[0].strip(), parts[1].strip() if len(parts) > 1 else ''
+        if not text or any(c in text for c in '\n\r\"\'`'):
+            raise ValueError(error)
+    if suffix and not re.fullmatch(r'(?:Briefly\s+)?(?:tell|report|describe)\b[^\r\n]*', suffix, re.I):
+        raise ValueError(error)
+    try:
+        if len(text.encode('utf-8')) > FILE_LIMIT:
+            raise ValueError(error)
+    except UnicodeError:
+        raise ValueError(error) from None
+    return {'path': path, 'text': text}
+
+
+def exact_write_matches(contract, action):
+    return (isinstance(action, dict) and set(action) == {'tool', 'path', 'text'}
+            and action['tool'] == 'write' and action['path'] == contract['path'] and action['text'] == contract['text'])
 
 
 def file_at(root, name):

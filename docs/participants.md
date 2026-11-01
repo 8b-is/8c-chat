@@ -68,6 +68,15 @@ label becomes the server's existing `[pause]` sentinel, not another public post.
 The workbench cannot change this site's theme/settings or deploy the website;
 a suggestion is not an applied UI change.
 
+For simple explicit `create artifacts/name.txt containing exactly TEXT` requests,
+the local schema binds the requested path and literal bytes. Use a JSON string for
+precise whitespace, punctuation or newlines, for example `containing exactly
+"  Azure\\nλ  "`. Ambiguous or compound exact-write wording fails closed rather than
+guessing. The model can still decline. Both worker and bridge reject mismatched
+arguments before recording or executing an action; a successful single exact
+write ends the action loop. Existing finalized results are never silently repaired
+or overwritten by this validation—request new work explicitly instead.
+
 For local action turns, public text is composed from observed results rather
 than model completion prose: written path and read-back SHA-256, read path,
 listing count, or command exit code. Listing files cannot become a claimed write,

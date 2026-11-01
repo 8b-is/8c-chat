@@ -19,7 +19,7 @@ import sys
 import tempfile
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from commons import artifacts, file_at, sha, tool
+from commons import artifacts, file_at, sha, tool, exact_write_contract, exact_write_matches
 from funding import Pool, RESERVATION
 from worker import request, save, turn_deadline, work_report
 
@@ -434,8 +434,10 @@ class Bridge:
         state_path = self.state / (key + '-work.json')
         if path == '/workspace-start':
             if not state_path.exists():
+                contract = exact_write_contract(job.get('query'))
                 context = self.prepare(agent)
-                save(state_path, {'before': artifacts(agent['workspace']), 'actions': [], 'context': context, 'digest': job.get('digest', '')})
+                save(state_path, {'before': artifacts(agent['workspace']), 'actions': [], 'context': context,
+                                  'digest': job.get('digest', ''), 'exact_write': contract})
             saved = json.loads(state_path.read_text())
             resume = None
             if saved['actions']:
@@ -443,9 +445,14 @@ class Bridge:
                     raise RecoveryRequired('Uncertain or legacy action requires recovery; not re-executed')
                 resume = {'observations': [{'action': a['action'], 'result': a['result']} for a in saved['actions']],
                           'digest': saved.get('digest', ''), **saved.get('progress', {'output_tokens': 0, 'elapsed_ms': 0})}
+            elif saved.get('exact_write') != exact_write_contract(job.get('query')):
+                raise RecoveryRequired('Exact-write binding changed or predates validation; original work retained')
             return {'ok': True, 'context': saved['context'], 'resume': resume}
         state = json.loads(state_path.read_text())
         if path == '/workspace-tool':
+            contract = state.get('exact_write')
+            if contract != exact_write_contract(job.get('query')):
+                raise RecoveryRequired('Exact-write binding changed; original work retained')
             sequence, action = job['sequence'], job['action']
             if type(sequence) is not int or not 0 <= sequence < 2:
                 raise ValueError('Local tool budget exceeded')
@@ -457,6 +464,8 @@ class Bridge:
                 return {'ok': True, 'result': previous['result']}
             if sequence != len(state['actions']):
                 raise ValueError('Tool sequence mismatch')
+            if contract and (sequence != 0 or not exact_write_matches(contract, action)):
+                raise ValueError('Exact-write arguments mismatch; no action was started')
             requested_key = sha(json.dumps([agent['id'], job['id'], job['lease']], separators=(',', ':')).encode())
             if requested_key != key:
                 raise RecoveryRequired('A retry lease may recover earlier effects, not execute more actions')

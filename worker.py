@@ -19,6 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from memory import Memory, MemoryFault, MemoryDeadline
+from commons import exact_write_contract, exact_write_matches
 
 LIMIT = 1_048_576
 HOSTED = ("opencode", "agy")
@@ -30,7 +31,7 @@ LOCAL_FINALIZE_NS = 45_000_000_000  # Two 15-second inventory calls + result RPC
 TOOLS = {"say": (), "decline": (), "list": (), "read": ("path",), "write": ("path",), "run": ("command",)}
 
 
-def tool_format(names):
+def tool_format(names, exact_write=None):
     choices = []
     for name in names:
         properties = {"tool": {"const": name}}
@@ -38,6 +39,8 @@ def tool_format(names):
         properties["text"] = {"type": "string"} if name in ("say", "decline", "write") else {"const": ""}
         if name in ("say", "decline"):
             properties["text"]["maxLength"] = 600
+        if name == 'write' and exact_write is not None:
+            properties.update({key: {'const': value} for key, value in exact_write.items()})
         choices.append({"type": "object", "properties": properties,
                         "required": list(properties), "additionalProperties": False})
     return {"oneOf": choices}
@@ -237,6 +240,12 @@ def infer(agent, job):
     no_actions = bool(re.search(r"\b(?:do not|don't|never|without)\s+(?:actually\s+)?(?:use|call|execute|create|write|read|inspect|run|test|list|check)\b", query, re.I))
     no_actions = no_actions or bool(re.search(r"\b(?:explain|describe)\s+how\b|\bhow\s+(?:does|do)\s+.*\btool\b|\b(?:without|no)\s+(?:any\s+)?(?:tools|tool calls|actions)\b", query, re.I))
     work_requested = not no_actions and not job.get("autonomous") and bool(re.search(r"\b(create|write|read|inspect|run|test|list|check)\b", query, re.I)) and bool(re.search(r"\b(artifacts/|src/|tests/|shared/|reference/|tool\b)", query, re.I))
+    exact_write, exact_error = None, None
+    try:
+        exact_write = exact_write_contract(query) if work_requested else None
+    except ValueError as error:
+        # A newer grammar must not prevent immutable legacy replay/recovery.
+        exact_error = str(error)
     if not job.get("autonomous"):
         options["temperature"] = 0
     else:
@@ -265,17 +274,20 @@ def infer(agent, job):
             elif not job.get("autonomous"):
                 system += "\nAnswer the current question directly from the supplied native recall and current participant's own introduction. Do not turn their question back on them or ask them to repeat information that is already supplied. If the relevant information is absent, say that you do not know."
                 prompt += "Answer the current question now; do not ask that same question back to the participant.\n"
-        except ParticipantResting:
-            # An explicit bridge refusal or conflicting receipt is not an
-            # unavailable optional service; do not generate a replacement turn.
-            raise
         except WorkRecovery:
+            raise
+        except ParticipantResting:
+            # An explicit refusal must never generate a replacement turn.
+            if exact_error:
+                raise ParticipantResting(exact_error) from None
             raise
         except (OSError, ValueError):
             if work_requested:
-                raise ParticipantResting("The workbench is resting; your request is saved. Please retry shortly.")
+                raise ParticipantResting(exact_error or "The workbench is resting; your request is saved. Please retry shortly.")
             workbench = False
             prompt += "\nThe workbench is currently unavailable. Converse normally using your native memories; do not claim file or tool access this turn.\n"
+    if exact_error and not resumed:
+        raise ParticipantResting(exact_error)
     use_tools = bool(workbench and work_requested)
     tokens = resumed['output_tokens'] if resumed else 0
     observations = [(o['action'], o['result']) for o in resumed['observations']] if resumed else []
@@ -301,7 +313,9 @@ def infer(agent, job):
             # Decline always remains possible; a work-related prompt never
             # forces an effect. Say is reserved for conversation/results, not
             # unsupported narration of work that has not happened.
-            payload["format"] = tool_format(allowed)
+            if exact_write:
+                allowed = ['write', 'decline'] if step < 3 else ['decline']
+            payload["format"] = tool_format(allowed, exact_write)
         try:
             generation_deadline = deadline - (LOCAL_FINALIZE_NS if workbench else 30_000_000_000)
             result = request(agent["endpoint"], "/api/generate", payload,
@@ -336,6 +350,11 @@ def infer(agent, job):
                 raise ValueError("Local response remained malformed after bounded correction") from None
             prompt += '\nThe previous JSON response was incomplete or malformed and was not accepted or executed. Return a complete JSON object. Keep say/decline to one short sentence; never output unfinished JSON.\n'
             continue
+        if exact_write and isinstance(action, dict) and action.get('tool') not in ('say', 'decline') and not exact_write_matches(exact_write, action):
+            if step == 3:
+                raise ValueError('Exact-write arguments remained mismatched; no action was dispatched')
+            prompt += '\nThe proposed action did not match the current exact-write request and was NOT executed. Use write with these exact arguments, or decline: ' + json.dumps(exact_write, ensure_ascii=False) + '\n'
+            continue
         if not isinstance(action, dict) or action.get("tool") not in (*allowed, "say") or not isinstance(action.get("text"), str):
             raise ValueError("Invalid or disallowed local workbench response")
         required = {"read": "path", "write": "path", "run": "command"}.get(action["tool"])
@@ -361,6 +380,11 @@ def infer(agent, job):
                              timeout=remaining_seconds(job['work_deadline_ns'], 25))
         performed += 1
         observations.append((action, observation["result"]))
+        if exact_write:
+            # The bridge writes and reads back the bytes. A second model turn
+            # cannot turn this single-write request into additional actions.
+            text = work_report(observations)
+            break
         prompt += "\nTool request: " + json.dumps(action) + "\nObserved tool result: " + json.dumps(observation["result"], ensure_ascii=False)[:4000]
         prompt += anchor + "\nIf the work is complete, use say to briefly report this observed result to the current participant. Answer their request, not the quoted history. CURRENT REQUEST: " + query + "\n"
         if performed == 2 or step == 2:
