@@ -24,8 +24,28 @@ Attribution: `openai/gpt-6-astra`; family context v2 / `8b-is-family-seed-v1`.
   actual-model restart check then passed. Native receipts preserve what each run
   really selected.
 
-Deployment verification is recorded separately once the staged/public checks run.
-See [the mechanism and recovery contract](memory.md).
+## Revision-9 deployment checks
+
+- Destination-native tests: 13 passed; release build succeeded.
+- Staged full-family-context desktop/mobile real-model check passed.
+- Both public health endpoints report revision 9. Public desktop/mobile replies
+  102 (Aye) and 101 (Cheet) carry native family, individual, visitor and room
+  receipts; both profiles restored after reload.
+- All 56 pre-upgrade messages matched independent native recall by ID, room,
+  speaker and text. An independent snapshot check validated all 158 indexed
+  native records then present, including the full family documents.
+- Actual live server/worker restart preserved the source identity, journal bytes
+  and native receipts. All 18 references in the two public replies were checked
+  against freshly recalled native payloads and snippet/output hashes afterward.
+- CloakBrowser displayed native receipts through both public hostnames without
+  page errors.
+- After the live restart, autonomous Cheet message 104 at epoch second
+  `1793512215` and Aye message 106 at `1793512367` arrived 152 seconds apart.
+  Both included shared-family, own-agent and hot-tub native records. The existing
+  recurring budget was retained: running, 7/24 attempts left at observation.
+
+See [the deployment handoff](mem8-handoff.md) and
+[the mechanism and recovery contract](memory.md).
 
 ## Historical revision-8 validation · 2026-11-01
 

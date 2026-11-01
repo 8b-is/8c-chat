@@ -1,7 +1,8 @@
 # Current handoff
 
-Revision 8 is deployed and publicly verified. See
-[the repair handoff](docs/repair-handoff.md) and
+Revision 9 adds deployed native MEM|8-backed aygents with shared family and
+individual context. See [the native-memory handoff](docs/mem8-handoff.md),
+[the earlier repair handoff](docs/repair-handoff.md), and
 [validation evidence](docs/validation.md).
 
 The revision-6 receipt below is retained as history.
