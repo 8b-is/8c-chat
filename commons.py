@@ -5,15 +5,76 @@ import json
 import os
 from pathlib import Path
 import resource
+import re
+import shlex
 import subprocess
 import sys
+import tempfile
 import time
 
 FILE_LIMIT = 16_384
+FAMILY_REPOS = ('g8t', '8c-chat', 'deepsiper-enthea', 'smart-tree', 'aurora', 'CloakBrowser')
+FAMILY_DOCS = ('/data/AGENTS.md', '/data/8b-is/FAMILY_CONTEXT.md', '/data/8b-is/FAMILY_SEED.md')
+G8T_MCP_COMMANDS = ('health', 'endpoints', 'circuits', 'leaderboard', 'feed', 'digest', 'bench')
+GH_READ_COMMANDS = {
+    ('repo', 'view'), ('repo', 'list'),
+    ('pr', 'list'), ('pr', 'view'), ('pr', 'checks'), ('pr', 'diff'), ('pr', 'status'),
+    ('issue', 'list'), ('issue', 'view'), ('issue', 'status'),
+    ('run', 'list'), ('run', 'view'),
+    ('search', 'repos'), ('search', 'issues'), ('search', 'prs'), ('search', 'code'), ('search', 'commits'),
+}
 
 
 def sha(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+def exact_write_contract(query):
+    """Recognize one explicit literal-write form; never guess ambiguous bytes.
+
+    Unquoted text ends at a sentence delimiter. JSON strings preserve whitespace,
+    punctuation and escapes exactly. This restricts actions; it never authorizes
+    them. Callers must separately enforce current-request/no-action policy.
+    """
+    if not isinstance(query, str) or not re.search(r'\bcontaining\s+exactly\b', query, re.I):
+        return None
+    error = 'For an exact write, specify one relative file path and one literal; use a JSON string for punctuation or whitespace.'
+    if len(re.findall(r'\bcontaining\s+exactly\b', query, re.I)) != 1:
+        raise ValueError(error)
+    match = re.search(r'\b(?:create|write)\s+((?:artifacts|src|tests)/[^\s\"\'`]+)\s+containing\s+exactly\s+', query, re.I)
+    if not match:
+        raise ValueError(error)
+    path, rest = match[1], query[match.end():]
+    if any(part.startswith('.') for part in Path(path).parts):
+        raise ValueError(error)
+    if rest.startswith('"'):
+        try:
+            text, end = json.JSONDecoder().raw_decode(rest)
+        except ValueError:
+            raise ValueError(error) from None
+        if not isinstance(text, str):
+            raise ValueError(error)
+        suffix = rest[end:].strip()
+        if suffix.startswith('.'):
+            suffix = suffix[1:].strip()
+    else:
+        parts = re.split(r'\.(?:\s+|$)', rest, maxsplit=1)
+        text, suffix = parts[0].strip(), parts[1].strip() if len(parts) > 1 else ''
+        if not text or any(c in text for c in '\n\r\"\'`'):
+            raise ValueError(error)
+    if suffix and not re.fullmatch(r'(?:Briefly\s+)?(?:tell|report|describe)\b[^\r\n]*', suffix, re.I):
+        raise ValueError(error)
+    try:
+        if len(text.encode('utf-8')) > FILE_LIMIT:
+            raise ValueError(error)
+    except UnicodeError:
+        raise ValueError(error) from None
+    return {'path': path, 'text': text}
+
+
+def exact_write_matches(contract, action):
+    return (isinstance(action, dict) and set(action) == {'tool', 'path', 'text'}
+            and action['tool'] == 'write' and action['path'] == contract['path'] and action['text'] == contract['text'])
 
 
 def file_at(root, name):
@@ -26,7 +87,49 @@ def file_at(root, name):
     return target
 
 
-def run(directory, command, deadline_ns=None):
+def safe_host_command(command, autonomous=False):
+    """Validate single-command invocations for g8t-mcp, cloak-browse, and gh."""
+    if not isinstance(command, str) or any(c in command for c in ';&|><`\n\r$'):
+        return None
+    try:
+        argv = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    if not argv:
+        return None
+    base = Path(argv[0]).name
+    if base == 'g8t-mcp' and len(argv) >= 2 and argv[1] in G8T_MCP_COMMANDS:
+        return ['/usr/local/bin/g8t-mcp', *argv[1:]]
+    if base == 'cloak-browse' and len(argv) >= 2:
+        if argv[1] == 'info' and len(argv) == 2:
+            return ['/usr/local/bin/cloak-browse', 'info']
+        if argv[1].startswith('https://'):
+            idx = 2
+            while idx < len(argv):
+                if argv[idx] in ('--selector', '--wait-ms', '--max-chars') and idx + 1 < len(argv):
+                    idx += 2
+                else:
+                    return None
+            return ['/usr/local/bin/cloak-browse', *argv[1:]]
+        return None
+    if base == 'gh' and len(argv) >= 3:
+        pair = (argv[1], argv[2])
+        if pair in GH_READ_COMMANDS:
+            if any(a.startswith('--hostname') for a in argv[3:]):
+                return None
+            return ['/usr/bin/gh', *argv[1:]]
+        if autonomous and pair == ('pr', 'create'):
+            if '--head' in argv[3:]:
+                head_idx = argv.index('--head') + 1
+                if head_idx < len(argv) and argv[head_idx].startswith('agent/'):
+                    return ['/usr/bin/gh', *argv[1:]]
+        return None
+    if autonomous and base == 'agent-worktree' and len(argv) >= 2 and argv[1] in ('create', 'list', 'status', 'verify'):
+        return ['/data/workspace-admin/bin/agent-worktree', *argv[1:]]
+    return None
+
+
+def run(directory, command, deadline_ns=None, autonomous=False):
     """A command sees its workspace and system tools, no host home or network."""
     timeout = 20
     if deadline_ns is not None:
@@ -38,6 +141,24 @@ def run(directory, command, deadline_ns=None):
     directory = Path(directory).resolve(strict=True)
     if len(command) > 2000:
         raise ValueError('Command too long')
+    host_argv = safe_host_command(command, autonomous=autonomous)
+    if host_argv is not None and Path(host_argv[0]).exists():
+        env = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': os.environ.get('HOME', '/home/hue'), 'LANG': 'C.UTF-8'}
+        with tempfile.TemporaryFile(dir='/tmp/opencode') as output:
+            process = subprocess.Popen(host_argv, cwd=str(directory), env=env, stdin=subprocess.DEVNULL,
+                                       stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+            timed_out = False
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                import signal
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+                timed_out = True
+            output.seek(0)
+            text = output.read(FILE_LIMIT + 1)
+        return {'exit_code': process.returncode, 'output': text[:FILE_LIMIT].decode(errors='replace'),
+                'truncated': len(text) > FILE_LIMIT, 'timed_out': timed_out}
     args = ['/usr/bin/bwrap', '--unshare-all', '--die-with-parent', '--new-session',
             '--ro-bind', '/usr', '/usr', '--symlink', 'usr/bin', '/bin',
             '--symlink', 'usr/lib', '/lib', '--symlink', 'usr/lib', '/lib64',
@@ -46,7 +167,14 @@ def run(directory, command, deadline_ns=None):
     for name in ('.git', '.opencode', '.agents', 'AGENTS.md', 'reference', 'shared'):
         if (directory / name).exists():
             args += ['--ro-bind', str(directory / name), '/workspace/' + name]
-    args += ['--chdir', '/workspace', '--clearenv', '--setenv', 'PATH', '/usr/bin:/bin',
+    for doc in FAMILY_DOCS:
+        if Path(doc).exists():
+            args += ['--ro-bind', doc, doc]
+    for repo in FAMILY_REPOS:
+        repo_path = Path('/data/8b-is') / repo
+        if repo_path.exists():
+            args += ['--ro-bind', str(repo_path), str(repo_path)]
+    args += ['--chdir', '/workspace', '--clearenv', '--setenv', 'PATH', '/usr/local/bin:/usr/bin:/bin',
              '--setenv', 'HOME', '/tmp', '--setenv', 'LANG', 'C.UTF-8',
              '/usr/bin/bash', '--noprofile', '--norc', '-c', command]
     def limits():
@@ -54,7 +182,6 @@ def run(directory, command, deadline_ns=None):
         resource.setrlimit(resource.RLIMIT_FSIZE, (4_194_304, 4_194_304))
         resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
         resource.setrlimit(resource.RLIMIT_AS, (2_147_483_648, 2_147_483_648))
-    import tempfile
     with tempfile.TemporaryFile(dir='/tmp/opencode') as output:
         process = subprocess.Popen(args, stdout=output, stderr=subprocess.STDOUT, preexec_fn=limits, start_new_session=True)
         timed_out = False
@@ -94,7 +221,7 @@ def artifacts(directory):
     return result
 
 
-def tool(directory, action, deadline_ns=None):
+def tool(directory, action, deadline_ns=None, autonomous=False):
     if deadline_ns is not None and (type(deadline_ns) is not int or time.monotonic_ns() >= deadline_ns):
         raise ValueError('Tool deadline expired before execution')
     root = Path(directory)
@@ -102,7 +229,7 @@ def tool(directory, action, deadline_ns=None):
     if name == 'list':
         return {'files': sorted(p.relative_to(root).as_posix() for p in root.glob('*') if not p.name.startswith('.'))[:128]}
     if name == 'run':
-        return run(root, action['command'], deadline_ns)
+        return run(root, action['command'], deadline_ns, autonomous=autonomous)
     path = file_at(root, action['path'])
     if name == 'read':
         if path.stat().st_size > 65_536:
@@ -126,4 +253,4 @@ def tool(directory, action, deadline_ns=None):
 if __name__ == '__main__':
     # Installed as an immutable command wrapper; the model supplies only the
     # command, not mounts, credentials, endpoint configuration or host paths.
-    print(json.dumps(run(Path.cwd(), ' '.join(sys.argv[1:]))))
+    print(json.dumps(run(Path.cwd(), ' '.join(sys.argv[1:]), autonomous=os.environ.get('8C_AUTONOMOUS') == '1')))

@@ -208,3 +208,39 @@ class CommonsTests(unittest.TestCase):
                 self.assertEqual(len(list((Path(directory)/'shared'/'astra').glob('*.json'))), 1)
             finally:
                 bridge.lock.close()
+
+    def test_safe_host_command_scopes_read_tools_and_autonomous_pr_creation(self):
+        self.assertEqual(commons.safe_host_command('g8t-mcp health --json'), ['/usr/local/bin/g8t-mcp', 'health', '--json'])
+        self.assertEqual(commons.safe_host_command('cloak-browse info'), ['/usr/local/bin/cloak-browse', 'info'])
+        self.assertEqual(commons.safe_host_command('cloak-browse https://8c.is --max-chars 2000'),
+                         ['/usr/local/bin/cloak-browse', 'https://8c.is', '--max-chars', '2000'])
+        self.assertEqual(commons.safe_host_command('gh pr list -R 8b-is/g8t'), ['/usr/bin/gh', 'pr', 'list', '-R', '8b-is/g8t'])
+        for rejected in ('g8t-mcp health; id', 'cloak-browse http://127.0.0.1:49375', 'gh repo delete 8b-is/g8t',
+                         'gh pr merge 1', 'gh pr create --head agent/fix --title test'):
+            self.assertIsNone(commons.safe_host_command(rejected, autonomous=False), rejected)
+        self.assertEqual(commons.safe_host_command('gh pr create --head agent/fix --title test', autonomous=True),
+                         ['/usr/bin/gh', 'pr', 'create', '--head', 'agent/fix', '--title', 'test'])
+        self.assertIsNone(commons.safe_host_command('gh pr create --head main --title test', autonomous=True))
+        self.assertEqual(commons.safe_host_command('agent-worktree list', autonomous=True),
+                         ['/data/workspace-admin/bin/agent-worktree', 'list'])
+
+    def test_setup_workspace_configures_mcp_servers_and_autonomous_profile(self):
+        with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory:
+            root = Path(directory)
+            for name in ('sol', 'grok'):
+                agent = {'id': name, 'name': name.title(), 'runtime': 'opencode',
+                         'provider': 'openai' if name == 'sol' else 'xai',
+                         'model': 'gpt-6.1-sol' if name == 'sol' else 'grok-4.7',
+                         'fallback_provider': 'openrouter',
+                         'fallback_model': 'openai/gpt-6.1-sol' if name == 'sol' else 'x-ai/grok-4.7'}
+                hosted.setup_workspace(agent, root, None)
+                cfg = json.loads((root / name / '.opencode' / 'opencode.json').read_text())
+                self.assertIn('commons', cfg['agents'])
+                self.assertIn('commons-autonomous', cfg['agents'])
+                self.assertIn('commons-funded', cfg['agents'])
+                if Path('/usr/local/bin/st').exists():
+                    self.assertIn('smart-tree', cfg['mcp']['servers'])
+                if Path('/usr/local/bin/g8t-mcp').exists():
+                    self.assertIn('g8t', cfg['mcp']['servers'])
+                if Path('/usr/local/bin/cloak-browse').exists():
+                    self.assertIn('cloakbrowser', cfg['mcp']['servers'])

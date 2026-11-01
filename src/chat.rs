@@ -199,6 +199,9 @@ impl Chat {
             let timestamp = p[2]
                 .parse::<u64>()
                 .map_err(|_| "Invalid legacy timestamp")?;
+            if !valid_room(p[3]) {
+                return Err("Invalid legacy room; original retained".into());
+            }
             let message = obj! {"id" => id, "timestamp_secs" => timestamp, "room" => p[3], "sender_handle" => p[4], "sender_name" => p[5], "sender_kind" => p[6], "platform" => p[7], "text" => p[9], "origin" => "legacy", "client_id" => ""};
             self.commit(obj! {"type" => "message", "message" => message})?;
         }
@@ -1359,6 +1362,62 @@ mod tests {
         let chat = Chat::open(&f.path(), CONFIG, KEY.into(), Some(&legacy)).unwrap();
         assert_eq!(chat.messages["humayian-lounge"].len(), 1);
         assert_eq!(std::fs::read_to_string(legacy).unwrap(), bytes);
+    }
+    #[test]
+    fn invalid_legacy_room_keeps_journal_replayable_and_import_resumable() {
+        let f = Fixture::new();
+        let legacy = f.0.join("rooms.m8");
+        let prefix =
+            "MSG\t42\t1\thumayian-lounge\tperson@8c.is\tPerson\thuman\tweb\t0\tFirst note\t\n";
+        let invalid =
+            "MSG\t43\t2\tunknown-room\tperson@8c.is\tPerson\thuman\tweb\t0\tSecond note\t\n";
+        let original = format!("{prefix}{invalid}");
+        std::fs::write(&legacy, &original).unwrap();
+
+        let error = Chat::open(&f.path(), CONFIG, KEY.into(), Some(&legacy))
+            .err()
+            .unwrap();
+        assert_eq!(error, "Invalid legacy room; original retained");
+        assert_eq!(std::fs::read(&legacy).unwrap(), original.as_bytes());
+        let accepted = std::fs::read(f.path()).unwrap();
+        let mut records = Vec::new();
+        let store = Store::open(&f.path(), |record| {
+            records.push(record);
+            Ok(())
+        })
+        .unwrap();
+        drop(store);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].get("type").text(), "message");
+        assert_eq!(records[0].get("message").get("id").number(), 42);
+        assert_eq!(
+            records[0].get("message").get("room").text(),
+            "humayian-lounge"
+        );
+
+        // Retrying the unchanged source must neither duplicate its accepted prefix
+        // nor append the rejected record.
+        let error = Chat::open(&f.path(), CONFIG, KEY.into(), Some(&legacy))
+            .err()
+            .unwrap();
+        assert_eq!(error, "Invalid legacy room; original retained");
+        assert_eq!(std::fs::read(f.path()).unwrap(), accepted);
+        assert_eq!(std::fs::read(&legacy).unwrap(), original.as_bytes());
+
+        // An operator can review a separate copy while preserving the source.
+        let reviewed = f.0.join("rooms-reviewed.m8");
+        let corrected = original.replace("unknown-room", "hot-tub");
+        std::fs::write(&reviewed, &corrected).unwrap();
+        for _ in 0..2 {
+            let chat = Chat::open(&f.path(), CONFIG, KEY.into(), Some(&reviewed)).unwrap();
+            assert!(chat.imported);
+            assert_eq!(chat.messages["humayian-lounge"].len(), 1);
+            assert_eq!(chat.messages["humayian-lounge"][0].get("id").number(), 42);
+            assert_eq!(chat.messages["hot-tub"].len(), 1);
+            assert_eq!(chat.messages["hot-tub"][0].get("id").number(), 43);
+        }
+        assert_eq!(std::fs::read(&legacy).unwrap(), original.as_bytes());
+        assert_eq!(std::fs::read(&reviewed).unwrap(), corrected.as_bytes());
     }
     #[test]
     fn corrupted_journal_is_retained_and_second_writer_is_rejected() {

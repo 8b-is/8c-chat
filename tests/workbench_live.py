@@ -52,7 +52,8 @@ try:
              ('cheet','humayian-lounge','Hey guys',False),
              ('aye','humayian-lounge','People and Ayes. LOVE IT',False),
              ('aye','humayian-lounge','Can we make this room more retro?',False),
-             ('cheet','humayian-lounge','Can we make this room more retro?',False)]
+             ('cheet','humayian-lounge','Can we make this room more retro?',False),
+             ('aye','model-lab','Use your write tool to create artifacts/aye-marker.txt containing exactly amber observatory. Briefly report the result.',False)]
     for index, (identifier,room,query,autonomous) in enumerate(cases):
         agent = next(a for a in agents if a['id']==identifier)
         case_name = str(index+1).zfill(2)+'-'+identifier+'-'+room
@@ -77,10 +78,11 @@ try:
             return response
         with patch.object(worker,'bridge',side_effect=dispatch), patch.object(worker,'request',side_effect=observe):
             result = worker.infer(agent,prepared)
-        if index==0:
-            assert (root/'commons'/'cheet'/'artifacts'/'local-marker.txt').read_text()=='copper lighthouse',result
+        if query.startswith('Use your write tool'):
+            expected_path, expected_text = ('artifacts/local-marker.txt','copper lighthouse') if identifier=='cheet' else ('artifacts/aye-marker.txt','amber observatory')
+            assert (root/'commons'/identifier/expected_path).read_text()==expected_text,result
             assert {'name':'write','status':'completed'} in result['work']['tools'],result
-            assert result['work']['artifacts'][0]['path']=='artifacts/local-marker.txt',result
+            assert result['work']['artifacts'][0]['path']==expected_path,result
             assert 'astra' not in result['text'].lower(),result
         elif index==1:
             assert 'copper lighthouse' in result['text'].lower() and 'life long learning' in result['text'].lower(),result
