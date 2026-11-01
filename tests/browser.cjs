@@ -116,6 +116,12 @@ async function run() {
     await a.locator("article .provenance summary").click();
     await a.getByText(/Aurora MEM8EV02/).waitFor();
     assert.match(await a.locator(".memory-receipt").textContent(),/family.*agent:aye/);
+    await a.locator("#ayeMode").selectOption("no");
+    await a.locator("#msgInput").fill("### Rich Note\n\nCheck `code` and **bold**:\n\n```mermaid\nflowchart LR\n  A[Visitor] --> B[Mermaid SVG]\n```");
+    await a.locator("#sendBtn").click();
+    await a.locator("article svg.mermaid-svg").waitFor();
+    assert.equal(await a.locator("article .md-h3").textContent(), "Rich Note");
+    assert.equal(await a.locator("article code.md-code").textContent(), "code");
     await a.screenshot({path:path.join(directory,"desktop.png")}); await b.screenshot({path:path.join(directory,"mobile.png")});
 
     // A delayed profile update must not restore someone who has signed out.

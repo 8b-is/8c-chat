@@ -220,6 +220,10 @@ class CommonsTests(unittest.TestCase):
         self.assertEqual(commons.safe_host_command('8c-self-deploy check'), ['/usr/local/bin/8c-self-deploy', 'check'])
         self.assertEqual(commons.safe_host_command('8c-self-deploy patch artifacts/ui.patch'),
                          ['/usr/local/bin/8c-self-deploy', 'patch', 'artifacts/ui.patch'])
+        self.assertEqual(commons.safe_host_command('8c-self-deploy apply artifacts/ui.patch --message "feat(8c): ui"'),
+                         ['/usr/local/bin/8c-self-deploy', 'apply', 'artifacts/ui.patch', '--message', 'feat(8c): ui'])
+        self.assertEqual(commons.safe_host_command('8c-self-deploy patch artifacts/ui.patch --deploy --message "feat(8c): ui"'),
+                         ['/usr/local/bin/8c-self-deploy', 'patch', 'artifacts/ui.patch', '--deploy', '--message', 'feat(8c): ui'])
         self.assertEqual(commons.safe_host_command('8c-self-deploy deploy --message "feat(8c): live update"'),
                          ['/usr/local/bin/8c-self-deploy', 'deploy', '--message', 'feat(8c): live update'])
         self.assertEqual(commons.safe_host_command('cloak-browse info'), ['/usr/local/bin/cloak-browse', 'info'])
@@ -257,3 +261,39 @@ class CommonsTests(unittest.TestCase):
                     self.assertIn('g8t', cfg['mcp']['servers'])
                 if Path('/usr/local/bin/cloak-browse').exists():
                     self.assertIn('cloakbrowser', cfg['mcp']['servers'])
+
+    def test_agy_synthesis_fallback_when_tool_turn_emits_no_text(self):
+        with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory:
+            root = Path(directory)
+            (root / 'artifacts').mkdir()
+            (root / 'artifacts' / 'g8t.patch').write_text('diff --git a/src/lib.rs b/src/lib.rs\n')
+            agent = {
+                'id': 'agy', 'name': 'agy', 'runtime': 'agy',
+                'provider': 'google', 'model': 'gemini-4-argon-medium',
+                'binary': '/home/hue/.local/bin/agy', 'workspace': str(root),
+                'turn_deadline_ns': time.monotonic_ns() + 80_000_000_000
+            }
+            calls = []
+            def fake_command(args, cwd, timeout, stdin=None):
+                calls.append(args)
+                if len(calls) == 1:
+                    return '\n'.join([
+                        json.dumps({'event': 'init', 'init': {'model': 'gemini-4-argon-medium'}}),
+                        json.dumps({'event': 'step_update', 'step_update': {'step_type': 'tool', 'state': 'DONE', 'tool_name': 'write_file'}}),
+                        json.dumps({'event': 'result', 'result': {'status': 'SUCCESS', 'conversation_id': 'ses-agy-1', 'response': '', 'usage': {'output_tokens': 12}}})
+                    ])
+                return '\n'.join([
+                    json.dumps({'event': 'init', 'init': {'model': 'gemini-4-argon-medium'}}),
+                    json.dumps({'event': 'step_update', 'step_update': {'step_type': 'agent_response', 'text_delta': 'Prepared '}}),
+                    json.dumps({'event': 'step_update', 'step_update': {'step_type': 'agent_response', 'text_delta': '`artifacts/g8t.patch`.'}}),
+                    json.dumps({'event': 'result', 'result': {'status': 'SUCCESS', 'conversation_id': 'ses-agy-2', 'response': '', 'usage': {'output_tokens': 8}}})
+                ])
+            with patch.object(hosted, 'command', side_effect=fake_command):
+                text, session_id, tokens, tools, route = hosted.agy(agent, 'Prepare g8t.patch')
+            self.assertEqual(len(calls), 2)
+            self.assertNotIn('--sandbox', calls[0])
+            self.assertEqual(text, 'Prepared `artifacts/g8t.patch`.')
+            self.assertEqual(session_id, 'ses-agy-1')
+            self.assertEqual(tokens, 20)
+            self.assertEqual(tools, [{'name': 'write_file', 'status': 'completed'}])
+            self.assertIsNone(route)

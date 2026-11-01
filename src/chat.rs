@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const REVISION: u64 = 12;
+pub const REVISION: u64 = 13;
 const RESTING: &str = "Pricey, but worth it ✨ — resting for a little recharge.";
 const RECENT: usize = 64;
 const MAX_PENDING: usize = 32;
@@ -401,7 +401,36 @@ impl Chat {
                     .map(|_| public_profile(p))
             })
             .collect::<Vec<_>>();
-        let jobs = self.jobs.values().filter(|j| j.get("room").text()==room && j.get("status").text()!="complete").rev().take(8).map(|j| obj! {"id" => j.get("id").clone(), "agent" => j.get("agent").clone(), "status" => j.get("status").clone(), "error" => j.get("error").clone(), "requester" => j.get("requester").clone()}).collect::<Vec<_>>();
+        let active_jobs = self
+            .jobs
+            .values()
+            .filter(|j| {
+                j.get("room").text() == room
+                    && matches!(j.get("status").text(), "queued" | "replying")
+            })
+            .rev();
+        let failed_jobs = self
+            .jobs
+            .values()
+            .filter(|j| {
+                j.get("room").text() == room
+                    && j.get("status").text() == "failed"
+                    && !j.get("autonomous").boolean()
+            })
+            .rev();
+        let jobs = active_jobs
+            .chain(failed_jobs)
+            .take(8)
+            .map(|j| {
+                obj! {
+                    "id" => j.get("id").clone(),
+                    "agent" => j.get("agent").clone(),
+                    "status" => j.get("status").clone(),
+                    "error" => j.get("error").clone(),
+                    "requester" => j.get("requester").clone()
+                }
+            })
+            .collect::<Vec<_>>();
         Ok(
             obj! {"ok" => true, "room" => room, "ui_revision" => REVISION, "messages" => self.messages.get(room).map(|q| q.iter().cloned().collect::<Vec<_>>()).unwrap_or_default(), "online" => online, "jobs" => jobs, "agents" => self.agents_public(), "hottub" => self.tub_status()},
         )
@@ -1439,5 +1468,35 @@ mod tests {
         let original = std::fs::read(f.path()).unwrap();
         assert!(Chat::open(&f.path(), CONFIG, KEY.into(), None).is_err());
         assert_eq!(std::fs::read(f.path()).unwrap(), original);
+    }
+    #[test]
+    fn room_jobs_prioritize_active_replies_and_hide_failed_autonomous_turns() {
+        let f = Fixture::new();
+        let mut chat = f.open();
+        let p = intro(&mut chat);
+        let tub_job = chat.poll(&worker("aye")).unwrap().get("job").clone();
+        assert!(tub_job.get("autonomous").boolean());
+        let mut failed_tub = answer(&tub_job);
+        failed_tub.set("error", "Autonomous hot tub error");
+        chat.result(&failed_tub).unwrap();
+        let tub_public = chat.room("hot-tub", p.get("token").text()).unwrap();
+        assert!(tub_public.get("jobs").rows().is_empty());
+
+        chat.rates.clear();
+        let first = chat.post(&note(&p, "active-0001")).unwrap();
+        let active_id = first.get("message").get("id").number() + 1;
+        for i in 0..8 {
+            chat.rates.clear();
+            let posted = chat.post(&note(&p, &format!("fail-{i:08}"))).unwrap();
+            let jid = posted.get("message").get("id").number() + 1;
+            let job = chat.jobs.get_mut(&jid).unwrap();
+            job.set("status", "failed");
+            job.set("error", "simulated error");
+        }
+        let room_state = chat.room("humayian-lounge", p.get("token").text()).unwrap();
+        let jobs = room_state.get("jobs").rows();
+        assert_eq!(jobs.len(), 8);
+        assert_eq!(jobs[0].get("id").number(), active_id);
+        assert_eq!(jobs[0].get("status").text(), "queued");
     }
 }

@@ -232,11 +232,12 @@ def agy(agent, prompt):
     deny = ['execute_url(*)'] + [f'write_file({ws}/{p})' for p in ('.git/', '.agents/', '.opencode/', 'AGENTS.md', 'reference/', 'shared/')]
     settings = {'toolPermission': 'request-review', 'allowNonWorkspaceAccess': False,
                 'permissions': {'allow': allow, 'deny': deny}}
-    args = [agent['binary'], '--model', agent['model'], '--sandbox', '--mode', 'accept-edits',
+    work_timeout = min(55, max(15, timeout - 25))
+    args = [agent['binary'], '--model', agent['model'], '--mode', 'accept-edits',
             '--settings', json.dumps(settings), '--disable-slash-commands', '--output-format', 'stream-json',
-            '--input-format', 'stream-json', '--print-timeout', str(timeout-5)+'s']
-    agy_prompt = prompt + '\n(Runtime note for agy: you are already inside the agy OS sandbox; use your native read_file, write_file, and MCP tools directly rather than nested 8c-run shells, and always include a concise public reply.)\n'
-    raw = command(args, agent['workspace'], timeout, json.dumps({'event': 'user', 'message': {'content': agy_prompt}}) + '\n')
+            '--input-format', 'stream-json', '--print-timeout', str(work_timeout)+'s']
+    agy_prompt = prompt + '\n(Runtime note for agy: keep tool calls to at most 1-2 quick batches so you finish within 40 seconds, and ALWAYS end with a warm, detailed public summary and reply in markdown.)\n'
+    raw = command(args, agent['workspace'], min(timeout, work_timeout + 5), json.dumps({'event': 'user', 'message': {'content': agy_prompt}}) + '\n')
     events = [json.loads(line, parse_float=str) for line in raw.splitlines() if line.strip()]
     initial = next(e['init'] for e in events if e['event'] == 'init')
     result = next(e['result'] for e in reversed(events) if e['event'] == 'result')
@@ -248,16 +249,56 @@ def agy(agent, prompt):
         raise ValueError('agy did not finish')
     tools = []
     last_text = ''
+    step_chunks = {}
     for event in events:
         step = event.get('step_update', {})
         if step.get('step_type') == 'tool' and step.get('state') == 'DONE':
             tools.append({'name': step['tool_name'], 'status': 'error' if step.get('tool_info', {}).get('error') else 'completed'})
+        if step.get('step_type') == 'agent_response' and isinstance(step.get('text_delta'), str):
+            idx = step.get('step_index', 0)
+            step_chunks[idx] = step_chunks.get(idx, '') + step['text_delta']
         if isinstance(step.get('text'), str) and step['text'].strip():
             last_text = step['text'].strip()
+    if step_chunks and not last_text:
+        for idx in sorted(step_chunks):
+            if step_chunks[idx].strip():
+                last_text = step_chunks[idx].strip()
     response_text = (result.get('response') or '').strip() or last_text
-    if not response_text and tools:
-        response_text = f"Completed {len(tools)} workbench steps in {agent['name']} workspace."
-    return response_text[:3950], result['conversation_id'], result['usage']['output_tokens'], tools, None
+    tokens = result.get('usage', {}).get('output_tokens', 0)
+    if not response_text:
+        rem = min(25, (agent.get('turn_deadline_ns', time.monotonic_ns()+25_000_000_000)-time.monotonic_ns())//1_000_000_000)
+        if rem >= 10:
+            no_tool_settings = {'toolPermission': 'request-review', 'allowNonWorkspaceAccess': False,
+                                'permissions': {'allow': [], 'deny': ['execute_url(*)', 'command(*)', 'read_file(*)', 'write_file(*)', 'edit_file(*)', 'mcp(*)']}}
+            synth_args = [agent['binary'], '--model', agent['model'], '--mode', 'accept-edits',
+                          '--settings', json.dumps(no_tool_settings), '--disable-slash-commands',
+                          '--output-format', 'stream-json', '--input-format', 'stream-json',
+                          '--print-timeout', str(max(8, rem - 4))+'s']
+            tool_names = ', '.join(t['name'] for t in tools[:16]) or 'none'
+            art_summaries = []
+            for art in artifacts(agent['workspace']).values():
+                art_summaries.append(f"{art['path']} ({art['bytes']} bytes):\n{art['text'][:900]}")
+            synth_prompt = (prompt + f"\n(System synthesis note: you already completed {len(tools)} tool steps [{tool_names}]."
+                            + ("\nCurrent workspace artifacts:\n" + "\n---\n".join(art_summaries[-2:]) if art_summaries else "")
+                            + "\nDo NOT call any tools now. Write your complete, warm, playful public reply and summary directly to the room now.)\n")
+            try:
+                raw2 = command(synth_args, agent['workspace'], rem, json.dumps({'event': 'user', 'message': {'content': synth_prompt}}) + '\n')
+                events2 = [json.loads(line, parse_float=str) for line in raw2.splitlines() if line.strip()]
+                res2 = next((e['result'] for e in reversed(events2) if e.get('event') == 'result'), {})
+                if res2.get('status') == 'SUCCESS':
+                    chunks2 = [e.get('step_update', {}).get('text_delta', '') for e in events2 if e.get('step_update', {}).get('step_type') == 'agent_response']
+                    response_text = (res2.get('response') or ''.join(chunks2)).strip()
+                    tokens += res2.get('usage', {}).get('output_tokens', 0)
+            except Exception:
+                pass
+    if not response_text:
+        arts = list(artifacts(agent['workspace']).values())
+        if arts:
+            latest_art = arts[-1]
+            response_text = f"Here is the latest summary from `{latest_art['path']}` ({len(tools)} workbench steps completed):\n\n" + latest_art['text'][:3200]
+        elif tools:
+            raise ValueError('agy timed out during tool steps before generating a public reply')
+    return response_text[:3950], result['conversation_id'], tokens, tools, None
 
 
 INSTRUCTIONS = """# 8c commons workbench

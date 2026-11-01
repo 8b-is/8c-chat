@@ -120,11 +120,18 @@ def safe_host_command(command, autonomous=False):
         sub = argv[1]
         if sub in ('status', 'check') and len(argv) == 2:
             return ['/usr/local/bin/8c-self-deploy', sub]
-        if sub == 'patch' and len(argv) == 3:
+        if sub in ('patch', 'apply') and len(argv) >= 3:
             patch_arg = argv[2]
             if patch_arg.startswith('/') or '..' in Path(patch_arg).parts:
                 return None
-            return ['/usr/local/bin/8c-self-deploy', 'patch', patch_arg]
+            rest = argv[3:]
+            if not rest:
+                return ['/usr/local/bin/8c-self-deploy', sub, patch_arg]
+            if sub == 'patch' and rest[0] == '--deploy':
+                rest = rest[1:]
+            if not rest or (len(rest) >= 2 and rest[0] == '--message'):
+                return ['/usr/local/bin/8c-self-deploy', *argv[1:]]
+            return None
         if sub == 'deploy':
             if len(argv) == 2 or (len(argv) >= 4 and argv[2] == '--message'):
                 return ['/usr/local/bin/8c-self-deploy', *argv[1:]]
