@@ -158,36 +158,61 @@ def safe_host_command(command, autonomous=False):
     return None
 
 
+def safe_host_command_chain(command, autonomous=False):
+    """Validate one or more safe host commands joined by && or ;."""
+    single = safe_host_command(command, autonomous=autonomous)
+    if single is not None:
+        return [single]
+    if not isinstance(command, str) or any(c in command for c in '|><`\n\r$'):
+        return None
+    parts = [p.strip() for p in re.split(r'(?:&&|;)', command) if p.strip()]
+    if not parts or len(parts) > 4:
+        return None
+    chain = []
+    for part in parts:
+        argv = safe_host_command(part, autonomous=autonomous)
+        if argv is None:
+            return None
+        chain.append(argv)
+    return chain
+
+
 def run(directory, command, deadline_ns=None, autonomous=False):
     """A command sees its workspace and system tools, no host home or network."""
     directory = Path(directory).resolve(strict=True)
     if len(command) > 2000:
         raise ValueError('Command too long')
-    host_argv = safe_host_command(command, autonomous=autonomous)
-    timeout = 45 if (host_argv is not None and Path(host_argv[0]).name in ('g8t-worktree', '8c-self-deploy')) else 20
+    host_chain = safe_host_command_chain(command, autonomous=autonomous)
+    timeout = 45 if (host_chain is not None and any(Path(a[0]).name in ('g8t-worktree', '8c-self-deploy') for a in host_chain)) else 20
     if deadline_ns is not None:
         if type(deadline_ns) is not int:
             raise ValueError('Invalid command deadline')
         timeout = min(timeout, (deadline_ns - time.monotonic_ns()) // 1_000_000_000)
         if timeout <= 0:
             raise ValueError('Command deadline expired before execution')
-    if host_argv is not None and Path(host_argv[0]).exists():
+    if host_chain is not None and all(Path(a[0]).exists() for a in host_chain):
         env = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': os.environ.get('HOME', '/home/hue'), 'LANG': 'C.UTF-8', 'PWD': str(directory)}
-        with tempfile.TemporaryFile(dir='/tmp/opencode') as output:
-            process = subprocess.Popen(host_argv, cwd=str(directory), env=env, stdin=subprocess.DEVNULL,
-                                       stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
-            timed_out = False
-            try:
-                process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                import signal
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-                timed_out = True
-            output.seek(0)
-            text = output.read(FILE_LIMIT + 1)
-        return {'exit_code': process.returncode, 'output': text[:FILE_LIMIT].decode(errors='replace'),
-                'truncated': len(text) > FILE_LIMIT, 'timed_out': timed_out}
+        combined = b''
+        exit_code = 0
+        timed_out = False
+        for host_argv in host_chain:
+            with tempfile.TemporaryFile(dir='/tmp/opencode') as output:
+                process = subprocess.Popen(host_argv, cwd=str(directory), env=env, stdin=subprocess.DEVNULL,
+                                           stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+                try:
+                    process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    import signal
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
+                    timed_out = True
+                output.seek(0)
+                combined += output.read(FILE_LIMIT + 1)
+                exit_code = process.returncode
+                if exit_code != 0 or timed_out:
+                    break
+        return {'exit_code': exit_code, 'output': combined[:FILE_LIMIT].decode(errors='replace'),
+                'truncated': len(combined) > FILE_LIMIT, 'timed_out': timed_out}
     args = ['/usr/bin/bwrap', '--unshare-all', '--die-with-parent', '--new-session',
             '--ro-bind', '/usr', '/usr', '--symlink', 'usr/bin', '/bin',
             '--symlink', 'usr/lib', '/lib', '--symlink', 'usr/lib', '/lib64',
@@ -203,6 +228,15 @@ def run(directory, command, deadline_ns=None, autonomous=False):
         repo_path = Path('/data/8b-is') / repo
         if repo_path.exists():
             args += ['--ro-bind', str(repo_path), str(repo_path)]
+    for ro_extra in (
+        '/data/.agent-workspaces/8c-chat-bb80c2d68133-agent-capabilities-20261101',
+        '/data/.agent-workspaces/g8t-59dcc7978c6e-agent-forge-20261101',
+    ):
+        if Path(ro_extra).exists():
+            args += ['--ro-bind', ro_extra, ro_extra]
+    for state_ro in ('/data/.agent-state/8c-self-deploy.json', '/data/.agent-state/g8t-worktree.json', '/data/.agent-state/opensiper-maintenance.json'):
+        if Path(state_ro).exists():
+            args += ['--ro-bind', state_ro, state_ro]
     args += ['--chdir', '/workspace', '--clearenv', '--setenv', 'PATH', '/usr/local/bin:/usr/bin:/bin',
              '--setenv', 'HOME', '/tmp', '--setenv', 'LANG', 'C.UTF-8',
              '/usr/bin/bash', '--noprofile', '--norc', '-c', command]
