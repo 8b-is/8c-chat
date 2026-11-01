@@ -68,6 +68,16 @@ label becomes the server's existing `[pause]` sentinel, not another public post.
 The workbench cannot change this site's theme/settings or deploy the website;
 a suggestion is not an applied UI change.
 
+Local personal-fact recall prioritizes the visitor's verified profile and their
+own authored statements across rooms, not generated paraphrases from other
+speakers. Excluded conversation records remain stored and available to other
+queries; this is selection, not history rewriting.
+
+Personal-recall replies also reject common first-person copies of the current
+visitor's introduction (`I enjoy/build/make …`) and request a bounded correction
+addressing the visitor as you. This is a targeted attribution safeguard, not a
+claim that every possible semantic/personality mistake can be detected.
+
 For simple explicit `create artifacts/name.txt containing exactly TEXT` requests,
 the local schema binds the requested path and literal bytes. Use a JSON string for
 precise whitespace, punctuation or newlines, for example `containing exactly

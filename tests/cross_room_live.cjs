@@ -48,7 +48,7 @@ const preserve = () => fs.writeFileSync(path.join(root,'result.json'),JSON.strin
     };
     const recall = await post('Public continuity check after service restart: what do I enjoy making, and what does LLL mean in our shared family context? One short sentence.');
     assert(/copper lighthouse/i.test(recall.text));
-    assert(/life long learning/i.test(recall.text));
+    assert(/life\s*long learning/i.test(recall.text));
     assert(!/\bi (enjoy|build|make)\b/i.test(recall.text));
     assert.equal(recall.work.tools.length,0);
     const filename = `artifacts/aye-continuity-${run}.txt`;

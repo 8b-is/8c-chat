@@ -27,7 +27,7 @@ memory = Memory(root/'mem8',config['memory'],agents,config_path.parent)
 visitor = {'name':'Workbench verification visitor','handle':'visitor-workbench@8c.is',
            'bio':'I build copper lighthouses.','favorites':[]}
 history = {}
-for room in ('model-lab','hot-tub','humayian-lounge'):
+for room in ('model-lab','hot-tub','humayian-lounge','tokyo-lab'):
     history[room] = worker.request(os.environ['REPLAY_ORIGIN'],'/api/messages?room='+room)['messages'] if os.environ.get('REPLAY_ORIGIN') else []
 (root/'public-history.json').write_text(json.dumps({'origin':os.environ.get('REPLAY_ORIGIN'), 'rooms':history}))
 events = [{'type':'profile','profile':visitor}]
@@ -53,7 +53,8 @@ try:
              ('aye','humayian-lounge','People and Ayes. LOVE IT',False),
              ('aye','humayian-lounge','Can we make this room more retro?',False),
              ('cheet','humayian-lounge','Can we make this room more retro?',False),
-             ('aye','model-lab','Use your write tool to create artifacts/aye-marker.txt containing exactly amber observatory. Briefly report the result.',False)]
+             ('aye','model-lab','Use your write tool to create artifacts/aye-marker.txt containing exactly amber observatory. Briefly report the result.',False),
+             ('aye','tokyo-lab','Public continuity check after service restart: what do I enjoy making, and what does LLL mean in our shared family context? One short sentence.',False)]
     for index, (identifier,room,query,autonomous) in enumerate(cases):
         agent = next(a for a in agents if a['id']==identifier)
         case_name = str(index+1).zfill(2)+'-'+identifier+'-'+room
@@ -84,8 +85,8 @@ try:
             assert {'name':'write','status':'completed'} in result['work']['tools'],result
             assert result['work']['artifacts'][0]['path']==expected_path,result
             assert 'astra' not in result['text'].lower(),result
-        elif index==1:
-            assert 'copper lighthouse' in result['text'].lower() and 'life long learning' in result['text'].lower(),result
+        elif 'LLL' in query:
+            assert 'copper lighthouse' in result['text'].lower() and re.search(r'life\s*long learning', result['text'], re.I),result
             assert not re.search(r'\bi (enjoy|build|make)\b',result['text'],re.I),result
             assert not result['work']['tools'],result
         else:

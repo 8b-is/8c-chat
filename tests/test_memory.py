@@ -63,6 +63,24 @@ class NativeMemoryTests(unittest.TestCase):
         refs = self.memory.search('visitor:eva','conversation',stale)
         self.assertTrue(any(stale in self.memory.verified(ref)[0]['text'] for ref in refs))
 
+    def test_personal_recall_uses_visitor_authored_facts_not_agent_paraphrases(self):
+        wrong = self.message(3,'I enjoy making mirrored towers, so that must be your hobby too.')
+        wrong['message'].update(sender_kind='aye',sender_handle='aye@8c',sender_name='Aye',origin='local-worker')
+        self.memory.ingest(self.page([
+            {'type':'profile','profile':{'handle':'eva','name':'Eva','bio':'I build copper lighthouses.','favorites':[]}},
+            self.message(1,'I enjoy making copper lighthouses and painted kites.',room='tokyo-lab'),
+            wrong]))
+        original = {str(p):p.read_bytes() for p in self.root.glob('records/*/*.m8')}
+        prepared, receipt = self.memory.prepare(self.job(query='What do I enjoy making?',room='humayian-lounge'))
+        self.assertIn('copper lighthouses',prepared['prompt'])
+        self.assertIn('painted kites',prepared['prompt'])
+        self.assertNotIn('mirrored towers',prepared['prompt'])
+        self.assertEqual({r['scope'] for r in receipt['records']},{'family','agent:aye','visitor:eva'})
+        self.assertEqual(original,{str(p):p.read_bytes() for p in self.root.glob('records/*/*.m8')})
+        # The excluded statement remains retrievable when asking about the agent.
+        refs = self.memory.search('agent:aye','conversation','mirrored towers')
+        self.assertTrue(any('mirrored towers' in self.memory.verified(ref)[0]['text'] for ref in refs))
+
     def test_native_process_restart_old_recall_and_index_rebuild(self):
         page = self.page([self.message(1, "My keepsake phrase is amber otter telescope."), self.message(2, "What is my name and what do I enjoy making? Answer in one sentence.")])
         self.memory.ingest(page)
