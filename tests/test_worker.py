@@ -49,5 +49,23 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(worker.visible_text("<think>private reasoning</think> Hello"),"Hello")
         self.assertEqual(worker.visible_text("<think>unfinished reasoning"),"")
 
+    def test_unperformed_or_malformed_work_is_not_published(self):
+        agent={'id':'cheet','name':'Cheet','runtime':'ollama','model':'local:latest',
+               'endpoint':'http://127.0.0.1:11435','workbench':'http://127.0.0.1:8799'}
+        job={'id':1,'agent':'cheet','runtime':'ollama','model':agent['model'],'digest':'a'*64,
+             'system':'Answer the current visitor.','prompt':'Use the write tool to create artifacts/hello.txt.',
+             'query':'Use the write tool to create artifacts/hello.txt.'}
+        for response in ['{"tool":"run","command":"unfinished', '[]', '{"tool":"write","text":"missing path"}',
+                         '{"tool":"say","text":"I created artifacts/hello.txt."}']:
+            with self.subTest(response=response), patch.object(worker,'inventory',return_value='a'*64), \
+                 patch.object(worker,'bridge',return_value={'context':'Authorized workbench'}) as bridge, \
+                 patch.object(worker,'request',return_value={'done':True,'model':agent['model'],'eval_count':10,'response':response}):
+                with self.assertRaises(ValueError): worker.infer(agent,job)
+                self.assertEqual([call.args[1] for call in bridge.call_args_list],['/workspace-start'])
+        with patch.object(worker,'inventory',return_value='a'*64), patch.object(worker,'bridge',side_effect=OSError('offline')), \
+             patch.object(worker,'request') as model:
+            with self.assertRaises(worker.ParticipantResting): worker.infer(agent,job)
+            model.assert_not_called()
+
 
 if __name__ == "__main__": unittest.main()

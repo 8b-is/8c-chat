@@ -3,8 +3,11 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+import subprocess
+import time
 import commons
 import hosted
+import worker
 
 
 class CommonsTests(unittest.TestCase):
@@ -50,13 +53,140 @@ class CommonsTests(unittest.TestCase):
             try:
                 with patch.object(hosted,'request',return_value={'total_capsules':5}):
                     bridge.handle('/workspace-start',body)
-                job.update(sequence=0, action={'tool':'run','command':'printf x >> counter.txt'})
+                job.update(work_deadline_ns=time.monotonic_ns()+60_000_000_000, sequence=0, action={'tool':'run','command':'printf x >> counter.txt'})
                 first = bridge.handle('/workspace-tool',body)
                 self.assertEqual(first,bridge.handle('/workspace-tool',body))
                 self.assertEqual((Path(directory)/'aye'/'counter.txt').read_text(),'x')
                 job['action']['command']='printf y >> counter.txt'
                 with self.assertRaises(ValueError):bridge.handle('/workspace-tool',body)
             finally:bridge.lock.close()
+
+    def test_finalized_local_turn_replays_entire_generation_and_rejects_more_tools(self):
+        with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory:
+            agent = {'id':'aye', 'name':'Aye', 'runtime':'ollama', 'model':'aye:latest',
+                     'endpoint':'http://127.0.0.1:11435', 'workbench':'http://127.0.0.1:8799'}
+            bridge = hosted.Bridge({'agents':[agent]}, directory)
+            job = {'id':1, 'lease':'finalized', 'room':'tokyo-lab', 'agent':'aye',
+                   'runtime':'ollama', 'model':agent['model'], 'digest':'a'*64,
+                   'system':'', 'prompt':'Write artifacts/first.txt.'}
+            body = {'agent':'aye', 'runtime':'ollama', 'model':agent['model'], 'job':job}
+            try:
+                with patch.object(hosted, 'request', return_value={}):
+                    bridge.handle('/workspace-start', body)
+                job.update(work_deadline_ns=time.monotonic_ns()+60_000_000_000, sequence=0, action={'tool':'write', 'path':'artifacts/first.txt', 'text':'first'})
+                bridge.handle('/workspace-tool', body)
+                job['generation'] = {'text':'Wrote the first file.', 'digest':'a'*64,
+                                     'elapsed_ms':50, 'output_tokens':12}
+                original = bridge.handle('/workspace-result', body)
+                job['generation'] = {'text':'A different story.', 'digest':'a'*64,
+                                     'elapsed_ms':99, 'output_tokens':30}
+                self.assertEqual(bridge.handle('/workspace-result', body), original)
+                with patch.object(bridge, 'prepare') as prepare:
+                    self.assertEqual(bridge.handle('/workspace-start', body), original)
+                    prepare.assert_not_called()
+                job.update(sequence=1, action={'tool':'write', 'path':'artifacts/second.txt', 'text':'second'})
+                with self.assertRaisesRegex(ValueError, 'Finalized'):
+                    bridge.handle('/workspace-tool', body)
+                self.assertFalse((Path(directory)/'aye'/'artifacts'/'second.txt').exists())
+                def dispatch(a, path, j=None, **kwargs):
+                    return bridge.handle(path, {**body, 'job':j})
+                with patch.object(worker, 'inventory', return_value='a'*64), \
+                     patch.object(worker, 'bridge', side_effect=dispatch), patch.object(worker, 'request') as model:
+                    replayed = worker.infer(agent, job)
+                    model.assert_not_called()
+                self.assertEqual(replayed, original['generation'])
+                bridge.handle('/accept', body)
+                peer = json.loads(next((Path(directory)/'shared'/'aye').glob('*.json')).read_text())
+                self.assertEqual(peer['text'], replayed['text'])
+                self.assertEqual(peer['artifacts'], replayed['work']['artifacts'])
+            finally:
+                bridge.lock.close()
+
+    def test_uncertain_local_action_cannot_be_finalized(self):
+        with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory:
+            agent = {'id':'aye', 'name':'Aye', 'runtime':'ollama', 'model':'aye:latest'}
+            bridge = hosted.Bridge({'agents':[agent]}, directory)
+            job = {'id':1, 'lease':'uncertain', 'room':'tokyo-lab'}
+            body = {'agent':'aye', 'runtime':'ollama', 'model':agent['model'], 'job':job}
+            try:
+                with patch.object(hosted, 'request', return_value={}):
+                    bridge.handle('/workspace-start', body)
+                job.update(work_deadline_ns=time.monotonic_ns()+60_000_000_000, sequence=0, action={'tool':'run', 'command':'test command'})
+                with patch.object(hosted, 'tool', side_effect=OSError('connection lost')):
+                    with self.assertRaises(OSError):
+                        bridge.handle('/workspace-tool', body)
+                job['generation'] = {'text':'Done', 'digest':'a'*64, 'elapsed_ms':1, 'output_tokens':1}
+                with self.assertRaisesRegex(ValueError, 'Uncertain'):
+                    bridge.handle('/workspace-result', body)
+                self.assertFalse((bridge.state/(bridge.key(agent, job)+'.json')).exists())
+            finally:
+                bridge.lock.close()
+
+    def test_local_correction_keeps_action_sequence_and_publishes_only_say_text(self):
+        with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory:
+            agent = {'id':'cheet', 'name':'Cheet', 'runtime':'ollama', 'model':'local:latest',
+                     'endpoint':'http://127.0.0.1:11435', 'workbench':'http://127.0.0.1:8799'}
+            bridge = hosted.Bridge({'agents':[agent]}, directory)
+            job = {'id':1, 'lease':'corrected', 'room':'model-lab', 'agent':'cheet', 'runtime':'ollama',
+                   'model':agent['model'], 'digest':'a'*64, 'system':'Answer the current visitor.',
+                   'prompt':'Use the write tool to create artifacts/marker.txt with copper lighthouse.',
+                   'query':'Use the write tool to create artifacts/marker.txt with copper lighthouse.'}
+            responses = iter([
+                {'tool':'say','text':'I created the file.'},  # No observed action: must be corrected.
+                {'tool':'write','path':'artifacts/marker.txt','text':'copper lighthouse'},
+                {'tool':'read','path':'artifacts/marker.txt','text':''},
+                {'tool':'say','text':'Created and read back the copper lighthouse file.'}])
+            sequences = []
+            def dispatch(a, path, j=None, **kwargs):
+                if path == '/workspace-tool': sequences.append(j['sequence'])
+                return bridge.handle(path, {'agent':a['id'], 'runtime':a['runtime'], 'model':a['model'], 'job':j})
+            def generate(origin, path, body, **kwargs):
+                return {'done':True, 'model':agent['model'], 'eval_count':10, 'response':json.dumps(next(responses))}
+            try:
+                with patch.object(hosted,'request',return_value={}), patch.object(worker,'inventory',return_value='a'*64), \
+                     patch.object(worker,'bridge',side_effect=dispatch), patch.object(worker,'request',side_effect=generate) as model:
+                    result = worker.infer(agent,job)
+                self.assertEqual(sequences,[0,1])
+                self.assertIn('Wrote "artifacts/marker.txt" (SHA-256 ', result['text'])
+                self.assertIn('Read "artifacts/marker.txt".', result['text'])
+                self.assertNotIn('Created and read back', result['text'])
+                self.assertEqual(result['work']['artifacts'][0]['text'],'copper lighthouse')
+                self.assertEqual(result['output_tokens'],40)
+                self.assertEqual(model.call_args.args[2]['format'],worker.tool_format(['say','decline']))
+                self.assertFalse((Path(directory)/'shared').exists())
+            finally:bridge.lock.close()
+
+    def test_opencode_whole_turn_deadline_interrupts_and_retains_uncertain_session(self):
+        with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory:
+            active = Path(directory)/'active.json'
+            agent = {'id':'astra', 'name':'Astra', 'provider':'openai', 'model':'gpt-6-astra',
+                     'workspace':directory, 'active_file':str(active)}
+            for interrupt_fails in (False, True):
+                clock = [0]
+                timeouts = []
+                def api(a, method, path, body=None, timeout=20):
+                    if path == '/api/info':
+                        return {'pid':836, 'urls':['http://127.0.0.1:49375']}
+                    if path == '/api/session/active':
+                        if interrupt_fails: raise OSError('status unavailable')
+                        return {'data':{}}
+                    timeouts.append(timeout)
+                    if path == '/api/session':
+                        clock[0] += 20_000_000_000
+                        return {'data':{'id':'ses_deadline'}}
+                    if path.endswith('/prompt'):
+                        clock[0] += 20_000_000_000
+                    elif path.endswith('/wait'):
+                        clock[0] += 46_000_000_000
+                    elif path.endswith('/interrupt'):
+                        if interrupt_fails: raise subprocess.TimeoutExpired('interrupt',5)
+                        return {'interrupted':False}
+                    else: self.fail('Transcript retrieval started after the whole-turn deadline')
+                with patch.object(hosted.time,'monotonic_ns',side_effect=lambda:clock[0]), patch.object(hosted,'api',side_effect=api):
+                    with self.assertRaises(subprocess.TimeoutExpired) as failure: hosted.opencode(agent,'Hello')
+                self.assertEqual(failure.exception.cmd, 'OpenCode turn')
+                self.assertEqual(timeouts,[20,20,45,5])
+                self.assertEqual(active.exists(),interrupt_fails)
 
     def test_hosted_receipt_replay_and_shared_artifacts_require_acceptance(self):
         with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory:
