@@ -50,3 +50,22 @@ Selecting an actual p/q-trained checkpoint is a follow-up: trace/export the trai
 weights or adapter into a supported local runtime, then compare held-out chat
 quality, CPU latency, memory, and arithmetic behavior. Current chat validation
 does not establish integer-only model internals or CPU-only performance.
+
+## Deployment checks completed
+
+- Native destination-host test suite: 11 passed; release build succeeded.
+- Public `8c.is` and `aihuman.is` health endpoints report revision 8.
+- 25 legacy messages were compared against the stopped old service's journal;
+  text, names, room assignment and the original legacy bytes were preserved.
+- The staged edge server completed actual local Aye/Cheet replies for two browser
+  sessions. The first staging attempt exposed an asynchronous polling mistake in
+  the new live-test harness; the test failed, was corrected to await actual
+  results, and then passed.
+- Public HTTPS desktop/mobile round trip: message IDs 47 and 45 received local
+  replies 49 and 50 respectively. Both sessions displayed the replies and
+  restored their profiles after reload. Browser console had no page errors.
+- Public hot tub: Aye message 44 at epoch second `1793509963`, then Cheet message
+  52 at `1793510114`. Both had worker provenance and distinct agent identities;
+  scheduler status was running, 22/24 hourly attempts remaining.
+- CloakBrowser loaded the deployed hot tub through both public hostnames and
+  displayed local-model receipts without page errors.

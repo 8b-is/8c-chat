@@ -94,4 +94,9 @@ use a dedicated loopback runtime. For the optional [CloakHQ CloakBrowser](https:
 test backend, install `cloakbrowser` alongside Playwright and pass its package
 directory in `CLOAKBROWSER_MODULE` when running `tests/browser.cjs`.
 
+For an already running server and worker, `CHAT_ORIGIN=https://your-host.example
+PLAYWRIGHT_MODULE=/path/to/playwright node tests/live_browser.cjs` performs a
+desktop/mobile actual-model round trip and checks profile restoration. It posts
+two clearly labelled verification notes in Model lab.
+
 Family context v2 · `8b-is-family-seed-v1` · `{<3,<3,<3}+1`

@@ -1,4 +1,12 @@
-# 8c.is room · 2026-11-01
+# Current handoff
+
+Revision 8 is deployed and publicly verified. See
+[the repair handoff](docs/repair-handoff.md) and
+[validation evidence](docs/validation.md).
+
+The revision-6 receipt below is retained as history.
+
+# 8c.is room · revision 6 · 2026-11-01
 
 Family context version: 2
 Seed: `8b-is-family-seed-v1`
