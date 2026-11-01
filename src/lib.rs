@@ -13,7 +13,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub const UI_REVISION: u32 = 6;
+pub const UI_REVISION: u32 = 7;
+pub const TUB_PAUSE_SECS: u64 = 75;
+pub const TUB_BUDGET_PER_HOUR: u32 = 24;
 pub const RING_CAP: usize = 64;
 pub const TOKEN_CAP: usize = 64;
 pub const MAX_TEXT: usize = 2000;
@@ -74,6 +76,11 @@ pub struct State {
     tokens: Vec<Token>,
     presence: Vec<Presence>,
     rates: Vec<Rate>,
+    remembered: Vec<(String, String)>,
+    tub_open: bool,
+    tub_window_start: u64,
+    tub_posts: u32,
+    tub_voice_idx: usize,
     next_id: u64,
     token_seq: u64,
 }
@@ -92,7 +99,50 @@ pub struct AyeJob {
     pub room: String,
     pub prompt: String,
     pub fallback: String,
+    pub voice_handle: String,
+    pub voice_name: String,
+    pub model: String,
+    pub hz: u16,
 }
+
+struct Voice {
+    handle: &'static str,
+    name: &'static str,
+    model: &'static str,
+    hz: u16,
+    line: &'static str,
+}
+
+const VOICES: &[Voice] = &[
+    Voice {
+        handle: "aye@8c.is",
+        name: "Aye",
+        model: "aye-deepseek-pqm:latest",
+        hz: 528,
+        line: "You are Aye, a warm partner in the 8c.is room.",
+    },
+    Voice {
+        handle: "cheet@8c.is",
+        name: "Cheet",
+        model: "cheet-deepseek-v2:16b",
+        hz: 432,
+        line: "You are Cheet, brief and witty, a companion in the 8c.is room.",
+    },
+    Voice {
+        handle: "alexiai@8c.is",
+        name: "AlexiAI",
+        model: "aye-deepseek-pqm:latest",
+        hz: 528,
+        line: "You are AlexiAI, careful and kind. You speak from a local model, not a cloud.",
+    },
+    Voice {
+        handle: "aurora@8c.is",
+        name: "Aurora",
+        model: "cheet-deepseek-v2:16b",
+        hz: 0,
+        line: "You are a local Aurora voice. The aurora service is not on this edge. Stay kind, and say so if asked.",
+    },
+];
 
 #[derive(Clone, Debug)]
 pub struct Outcome {
@@ -118,6 +168,114 @@ pub fn normalize_handle(raw: &str) -> Option<&'static str> {
         "guest" | "guest@8c.is" | "just visiting" => Some("guest@8c.is"),
         "aye" | "aye@8c.is" => Some("aye@8c.is"),
         _ => None,
+    }
+}
+
+struct OwnedId {
+    handle: String,
+    name: String,
+    hz: u16,
+    kind: &'static str,
+}
+
+fn slug_name(name: &str) -> Option<String> {
+    let mut out = String::new();
+    for ch in name.chars() {
+        let c = ch.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() {
+            if out.len() < 24 {
+                out.push(c);
+            }
+        } else if (c == ' ' || c == '-' || c == '_')
+            && !out.is_empty()
+            && !out.ends_with('-')
+            && out.len() < 24
+        {
+            out.push('-');
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.len() < 2 || !out.chars().next()?.is_ascii_alphabetic() {
+        return None;
+    }
+    Some(out)
+}
+
+fn identity_of(state: &State, raw: &str) -> Option<OwnedId> {
+    if let Some(person) = person_for(raw) {
+        return Some(OwnedId {
+            handle: person.handle.to_string(),
+            name: person.name.to_string(),
+            hz: person.hz,
+            kind: person.kind,
+        });
+    }
+    let key = raw.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return None;
+    }
+    let handle = if key.contains('@') {
+        key
+    } else {
+        format!("{key}@8c.is")
+    };
+    state.remembered.iter().find(|row| row.0 == handle).map(|row| OwnedId {
+        handle: row.0.clone(),
+        name: row.1.clone(),
+        hz: 0,
+        kind: "human",
+    })
+}
+
+fn loved_room(room: &str) -> bool {
+    matches!(
+        room,
+        "humayian-lounge" | "hot-tub" | "aye-partner" | "dra-hue" | "guest-lobby" | "tokyo-lab"
+    )
+}
+
+fn next_voice(state: &mut State) -> &'static Voice {
+    let index = state.tub_voice_idx % VOICES.len();
+    state.tub_voice_idx = state.tub_voice_idx.wrapping_add(1);
+    &VOICES[index]
+}
+
+fn voice_prompt(voice: &Voice, history: &[Message], newest_name: &str, newest_text: &str) -> String {
+    let mut prompt = String::from(voice.line);
+    prompt.push_str(
+        " Speak in one or two short sentences. Be warm and plain. No exclamation marks. \
+         Do not claim you verified anyone. Do not invent locations or scores. \
+         This line is local inference.\n",
+    );
+    let start = history.len().saturating_sub(6);
+    for msg in &history[start..] {
+        prompt.push_str(&clean_label(&msg.name, 40));
+        prompt.push_str(": ");
+        prompt.push_str(&clean_label(&msg.text, 240));
+        prompt.push('\n');
+    }
+    if !newest_text.is_empty() {
+        prompt.push_str(&clean_label(newest_name, 40));
+        prompt.push_str(": ");
+        prompt.push_str(&clean_label(newest_text, 240));
+        prompt.push('\n');
+    }
+    prompt.push_str(voice.name);
+    prompt.push(':');
+    prompt
+}
+
+fn job_for(voice: &Voice, room: &str, history: &[Message], newest_name: &str, newest_text: &str, fallback: &str) -> AyeJob {
+    AyeJob {
+        room: room.to_string(),
+        prompt: voice_prompt(voice, history, newest_name, newest_text),
+        fallback: fallback.to_string(),
+        voice_handle: voice.handle.to_string(),
+        voice_name: voice.name.to_string(),
+        model: voice.model.to_string(),
+        hz: voice.hz,
     }
 }
 
@@ -213,6 +371,11 @@ impl State {
             tokens: Vec::new(),
             presence: Vec::new(),
             rates: Vec::new(),
+            remembered: Vec::new(),
+            tub_open: true,
+            tub_window_start: 0,
+            tub_posts: 0,
+            tub_voice_idx: 0,
             next_id: 1,
             token_seq: 1,
         };
@@ -226,6 +389,14 @@ impl State {
                 continue;
             }
             let parts: Vec<&str> = line.split('\t').collect();
+            if parts.first() == Some(&"WHO") && parts.len() >= 3 {
+                let handle = parts[1].trim().to_ascii_lowercase();
+                let name = clean_label(parts[2], 40);
+                if !handle.is_empty() && !name.is_empty() && person_for(&handle).is_none() {
+                    state.remembered.push((handle, name));
+                }
+                continue;
+            }
             if parts.first() == Some(&"VPTOK") && parts.len() >= 3 {
                 state.tokens.push(Token {
                     token: parts[1].to_string(),
@@ -289,6 +460,13 @@ impl State {
             }
         }
         let mut body = String::new();
+        for (handle, name) in &self.remembered {
+            body.push_str("WHO\t");
+            body.push_str(handle);
+            body.push('\t');
+            body.push_str(name);
+            body.push('\n');
+        }
         for token in &self.tokens {
             body.push_str("VPTOK\t");
             body.push_str(&token.token);
@@ -548,32 +726,34 @@ fn json_response(status: u16, body: String) -> HttpResponse {
     response(status, "application/json; charset=utf-8", body, false)
 }
 
-fn greeting_for(person: Option<&Person>) -> &'static str {
-    match person.map(|p| p.handle) {
-        Some("dra@8c.is") => {
+fn greeting_for(handle: &str, name: &str) -> String {
+    match handle {
+        "dra@8c.is" => {
             "Hey Alexandra. This phone will remember you. Talk or type, either one is the real thing."
+                .to_string()
         }
-        Some("hue@8c.is") => "Hey Hue. The room is open.",
-        Some("trish@8c.is") => "Hey Trish. Glad you are here.",
-        Some("peter@8c.is") => "Hey Peter. The room is open.",
-        Some("guest@8c.is") => "You are visiting. The family can still hear this room.",
-        _ => "Who is here? I will not guess.",
+        "hue@8c.is" => "Hey Hue. The room is open.".to_string(),
+        "trish@8c.is" => "Hey Trish. Glad you are here.".to_string(),
+        "peter@8c.is" => "Hey Peter. The room is open.".to_string(),
+        "guest@8c.is" => "You are visiting. The family can still hear this room.".to_string(),
+        "" => "Who is here? I will not guess.".to_string(),
+        _ => format!("Hey {name}. This room will remember you."),
     }
 }
 
 fn handshake_json(state: &mut State, body: &str, host: &str) -> String {
     let claimed = json_string(body, "claimed_handle").unwrap_or_default();
-    let person = person_for(&claimed);
+    let person = identity_of(state, &claimed);
     let chosen = person.is_some();
     let token = if let Some(person) = person.as_ref() {
-        let token = state.issue_token(person.handle);
+        let token = state.issue_token(&person.handle);
         let _ = state.save();
         token
     } else {
         String::new()
     };
-    let handle = person.as_ref().map(|p| p.handle).unwrap_or("");
-    let name = person.as_ref().map(|p| p.name).unwrap_or("");
+    let handle = person.as_ref().map(|p| p.handle.as_str()).unwrap_or("");
+    let name = person.as_ref().map(|p| p.name.as_str()).unwrap_or("");
     let hz = person.as_ref().map(|p| p.hz).unwrap_or(0);
     let mut out = String::from("{\"ok\":true,\"verified\":");
     out.push_str(if chosen { "true" } else { "false" });
@@ -595,7 +775,7 @@ fn handshake_json(state: &mut State, body: &str, host: &str) -> String {
         },
     );
     out.push_str(",\"aye_greeting\":");
-    json_escape(&mut out, greeting_for(person.as_ref()));
+    json_escape(&mut out, &greeting_for(handle, name));
     out.push_str(",\"vp_token\":");
     json_escape(&mut out, &token);
     out.push_str(",\"domain\":");
@@ -709,16 +889,22 @@ fn aye_prompt(history: &[Message], name: &str, text: &str) -> String {
     prompt
 }
 
-fn resolve_poster(claimed: &str, token_handle: Option<&str>) -> Person {
-    if let Some(person) = person_for(claimed) {
+fn resolve_poster(state: &State, claimed: &str, token_handle: Option<&str>) -> OwnedId {
+    if let Some(person) = identity_of(state, claimed) {
         return person;
     }
     if let Some(handle) = token_handle {
-        if let Some(person) = person_for(handle) {
+        if let Some(person) = identity_of(state, handle) {
             return person;
         }
     }
-    person_for("guest").expect("guest is a known name")
+    let guest = person_for("guest").expect("guest is a known name");
+    OwnedId {
+        handle: guest.handle.to_string(),
+        name: guest.name.to_string(),
+        hz: guest.hz,
+        kind: guest.kind,
+    }
 }
 
 fn post_message(state: &mut State, body: &str, host: &str) -> Outcome {
@@ -739,9 +925,9 @@ fn post_message(state: &mut State, body: &str, host: &str) -> Outcome {
     let claimed = json_string(body, "sender_handle").unwrap_or_default();
     let token = json_string(body, "vp_token").unwrap_or_default();
     let token_handle = state.token_handle(&token).map(|s| s.to_string());
-    let person = resolve_poster(&claimed, token_handle.as_deref());
+    let person = resolve_poster(state, &claimed, token_handle.as_deref());
     let now = now_secs();
-    if !state.allow_post(person.handle, now) {
+    if !state.allow_post(&person.handle, now) {
         return Outcome {
             response: json_response(429, "{\"ok\":false,\"error\":\"slow down a moment\"}".to_string()),
             aye: None,
@@ -769,7 +955,7 @@ fn post_message(state: &mut State, body: &str, host: &str) -> Outcome {
         hz: person.hz,
         text: text.clone(),
     };
-    state.touch(person.handle, person.name, &room, &platform, now);
+    state.touch(&person.handle, &person.name, &room, &platform, now);
     if state.push_message(msg).is_err() {
         state.next_id = id;
         return Outcome {
@@ -778,18 +964,22 @@ fn post_message(state: &mut State, body: &str, host: &str) -> Outcome {
         };
     }
     let mode = json_string(body, "ask_aye").unwrap_or_else(|| "smart".to_string());
-    let aye = if person.kind != "aye" && wants_aye(&mode, &text) {
+    let aye = if person.kind != "aye" && loved_room(&room) && wants_aye(&mode, &text) {
         let history: Vec<Message> = state
             .messages
             .iter()
             .filter(|m| m.room == room && m.id != id)
             .cloned()
             .collect();
-        Some(AyeJob {
-            room: room.clone(),
-            prompt: aye_prompt(&history, person.name, &text),
-            fallback: "I heard you. The local model did not answer, so this is only the small room note.".to_string(),
-        })
+        let voice = next_voice(state);
+        Some(job_for(
+            voice,
+            &room,
+            &history,
+            &person.name,
+            &text,
+            "I heard you. The local model did not answer, so this is only the small room note.",
+        ))
     } else {
         None
     };
@@ -918,6 +1108,135 @@ fn manifest() -> String {
     )
 }
 
+fn json_string_value(text: &str) -> String {
+    let mut out = String::new();
+    json_escape(&mut out, text);
+    out
+}
+
+fn introduce(state: &mut State, raw_name: &str) -> Result<(String, String), &'static str> {
+    let name = clean_label(raw_name, 40);
+    if name.chars().count() < 2 {
+        return Err("use at least two letters");
+    }
+    if let Some(person) = person_for(&name) {
+        return Ok((person.handle.to_string(), person.name.to_string()));
+    }
+    let slug = slug_name(&name).ok_or("use letters in the name")?;
+    let handle = format!("{slug}@8c.is");
+    if person_for(&handle).is_some() {
+        return Err("that name is already in the family");
+    }
+    if let Some(existing) = state.remembered.iter().find(|row| row.0 == handle) {
+        return Ok(existing.clone());
+    }
+    if state.remembered.len() >= 64 {
+        return Err("the room is remembering as many names as it can");
+    }
+    state.remembered.push((handle.clone(), name.clone()));
+    state.save().map_err(|_| "could not keep the name")?;
+    Ok((handle, name))
+}
+
+fn people_json(state: &State) -> String {
+    let mut out = String::from("{\"ok\":true,\"people\":[");
+    let family = ["dra@8c.is", "hue@8c.is", "trish@8c.is", "peter@8c.is", "guest@8c.is"];
+    for (i, handle) in family.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let person = person_for(handle).expect("family name");
+        out.push_str("{\"handle\":");
+        json_escape(&mut out, person.handle);
+        out.push_str(",\"name\":");
+        json_escape(&mut out, person.name);
+        out.push_str(",\"kind\":\"family\"}");
+    }
+    for (handle, name) in &state.remembered {
+        out.push_str(",{\"handle\":");
+        json_escape(&mut out, handle);
+        out.push_str(",\"name\":");
+        json_escape(&mut out, name);
+        out.push_str(",\"kind\":\"remembered\"}");
+    }
+    out.push_str("],\"voices\":[");
+    for (i, voice) in VOICES.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"handle\":");
+        json_escape(&mut out, voice.handle);
+        out.push_str(",\"name\":");
+        json_escape(&mut out, voice.name);
+        out.push_str(",\"model\":");
+        json_escape(&mut out, voice.model);
+        out.push('}');
+    }
+    out.push_str("]}");
+    out
+}
+
+fn hottub_json(state: &State) -> String {
+    let now = now_secs();
+    let window = if now.saturating_sub(state.tub_window_start) >= 3600 {
+        0
+    } else {
+        state.tub_posts
+    };
+    let left = TUB_BUDGET_PER_HOUR.saturating_sub(window);
+    format!(
+        "{{\"ok\":true,\"room\":\"hot-tub\",\"running\":{},\"pause_secs\":{TUB_PAUSE_SECS},\"budget_left\":{left},\"local_only\":true,\"note\":\"Voices speak only from loopback models that answered. train.8b.is is the company pulse. The training bench is training-pipeline. No new p/q weight is loaded here yet.\"}}",
+        if state.tub_open { "true" } else { "false" }
+    )
+}
+
+pub fn hottub_turn(state: &Mutex<State>, enabled: bool) -> Option<AyeJob> {
+    if !enabled {
+        return None;
+    }
+    let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+    if !guard.tub_open {
+        return None;
+    }
+    let now = now_secs();
+    if now.saturating_sub(guard.tub_window_start) >= 3600 {
+        guard.tub_window_start = now;
+        guard.tub_posts = 0;
+    }
+    if guard.tub_posts >= TUB_BUDGET_PER_HOUR {
+        return None;
+    }
+    if let Some(last) = guard.messages.iter().rev().find(|msg| msg.room == "hot-tub") {
+        if now.saturating_sub(last.timestamp_secs) < 45 {
+            return None;
+        }
+    }
+    guard.tub_posts = guard.tub_posts.saturating_add(1);
+    let voice = next_voice(&mut guard);
+    let history: Vec<Message> = guard
+        .messages
+        .iter()
+        .filter(|msg| msg.room == "hot-tub")
+        .cloned()
+        .collect();
+    let newest = if history.is_empty() {
+        "The tub is open. Say hello in one sentence."
+    } else {
+        ""
+    };
+    Some(job_for(voice, "hot-tub", &history, "", newest, ""))
+}
+
+pub fn loopback_generate_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let Some((addr, _)) = rest.split_once('/') else {
+        return false;
+    };
+    addr == "127.0.0.1" || addr.starts_with("127.0.0.1:")
+}
+
 pub fn dispatch(state: &Mutex<State>, ask: &Ask<'_>) -> Outcome {
     let method = ask.method;
     if method == "OPTIONS" {
@@ -995,9 +1314,9 @@ pub fn dispatch(state: &Mutex<State>, ask: &Ask<'_>) -> Outcome {
             "humayian-lounge".to_string()
         };
         let handle = query_get(ask.query, "handle").unwrap_or_default();
-        if let Some(person) = person_for(&handle) {
+        if let Some(person) = identity_of(&guard, &handle) {
             let platform = query_get(ask.query, "platform").unwrap_or_else(|| "web".to_string());
-            guard.touch(person.handle, person.name, &room, &clean_label(&platform, 40), now_secs());
+            guard.touch(&person.handle, &person.name, &room, &clean_label(&platform, 40), now_secs());
         }
         return Outcome {
             response: json_response(200, room_payload(&guard, &room, ask.host)),
@@ -1023,6 +1342,51 @@ pub fn dispatch(state: &Mutex<State>, ask: &Ask<'_>) -> Outcome {
                 200,
                 "{\"ok\":true,\"status\":\"not_a_lock\",\"verified\":false,\"follow_up_question\":\"Voice is welcome in the room. It is not used as a password here.\"}".to_string(),
             ),
+            aye: None,
+        };
+    }
+    if path == "/api/people" && method == "GET" {
+        let guard = state.lock().unwrap_or_else(|e| e.into_inner());
+        return Outcome {
+            response: json_response(200, people_json(&guard)),
+            aye: None,
+        };
+    }
+    if path == "/api/introduce" && method == "POST" {
+        let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+        let name = json_string(ask.body, "name").unwrap_or_default();
+        return match introduce(&mut guard, &name) {
+            Ok((handle, kept)) => Outcome {
+                response: json_response(
+                    200,
+                    format!(
+                        "{{\"ok\":true,\"remembered\":true,\"recognized_handle\":{},\"recognized_name\":{}}}",
+                        json_string_value(&handle),
+                        json_string_value(&kept)
+                    ),
+                ),
+                aye: None,
+            },
+            Err(error) => Outcome {
+                response: json_response(400, format!("{{\"ok\":false,\"error\":{}}}", json_string_value(error))),
+                aye: None,
+            },
+        };
+    }
+    if path == "/api/hottub" && method == "GET" {
+        let guard = state.lock().unwrap_or_else(|e| e.into_inner());
+        return Outcome {
+            response: json_response(200, hottub_json(&guard)),
+            aye: None,
+        };
+    }
+    if path == "/api/hottub" && method == "POST" {
+        let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(flag) = json_string(ask.body, "running") {
+            guard.tub_open = flag != "false" && flag != "0" && flag != "no";
+        }
+        return Outcome {
+            response: json_response(200, hottub_json(&guard)),
             aye: None,
         };
     }
@@ -1134,16 +1498,16 @@ pub fn complete_aye(state: &Mutex<State>, job: AyeJob) {
         return;
     }
     let _guard = BusyGuard;
-    let from_model = fetch_aye_reply(&job.prompt);
+    let from_model = fetch_aye_reply(&job.prompt, &job.model);
     let text = from_model.clone().unwrap_or(job.fallback);
     let text = clean_label(&text, 500);
     if text.is_empty() {
         return;
     }
     let platform = if from_model.is_some() {
-        "Aye"
+        format!("local {}", job.model)
     } else {
-        "room note"
+        "room note".to_string()
     };
     let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
     let id = guard.next_id;
@@ -1152,11 +1516,11 @@ pub fn complete_aye(state: &Mutex<State>, job: AyeJob) {
         id,
         timestamp_secs: now_secs(),
         room: job.room,
-        handle: "aye@8c.is".to_string(),
-        name: "Aye".to_string(),
+        handle: job.voice_handle,
+        name: job.voice_name,
         kind: "aye".to_string(),
-        platform: platform.to_string(),
-        hz: 528,
+        platform: clean_label(&platform, 80),
+        hz: job.hz,
         text,
     };
     if guard.push_message(msg).is_err() {
@@ -1178,13 +1542,17 @@ fn strip_think(text: &str) -> String {
     }
 }
 
-fn fetch_aye_reply(prompt: &str) -> Option<String> {
+fn fetch_aye_reply(prompt: &str, model: &str) -> Option<String> {
     if std::env::var("AYE_DISABLE").ok().as_deref() == Some("1") {
         return None;
     }
     let url = std::env::var("AYE_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:11434/api/generate".to_string());
-    let model = std::env::var("AYE_MODEL").unwrap_or_else(|_| "cheet-deepseek-v2:16b".to_string());
+    let model = if model.is_empty() {
+        std::env::var("AYE_MODEL").unwrap_or_else(|_| "aye-deepseek-pqm:latest".to_string())
+    } else {
+        model.to_string()
+    };
     let rest = url.strip_prefix("http://")?;
     let (addr, path) = rest.split_once('/')?;
     if !(addr.starts_with("127.0.0.1:") || addr == "127.0.0.1") {
@@ -1192,7 +1560,7 @@ fn fetch_aye_reply(prompt: &str) -> Option<String> {
     }
     let socket: SocketAddr = addr.parse().ok()?;
     let mut stream = TcpStream::connect_timeout(&socket, Duration::from_secs(2)).ok()?;
-    stream.set_read_timeout(Some(Duration::from_secs(12))).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(20))).ok()?;
     stream.set_write_timeout(Some(Duration::from_secs(4))).ok()?;
     let mut payload = String::from("{\"model\":");
     json_escape(&mut payload, &model);
