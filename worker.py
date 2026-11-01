@@ -18,7 +18,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from memory import Memory, MemoryFault, MemoryDeadline
+from memory import Memory, MemoryFault, MemoryDeadline, personal_recall
 from commons import exact_write_contract, exact_write_matches
 
 LIMIT = 1_048_576
@@ -182,6 +182,9 @@ def conversation_text(text, agent, job, prompt):
             if sum(window in context for window in windows) * 4 >= len(windows) * 3:
                 return '[pause]'
     query = job.get('query', '')
+    if (isinstance(job.get('participant'), dict) and personal_recall(job)
+            and re.search(r'\bI (?:enjoy|build|make)\b', text, re.I)):
+        raise ValueError('Personal recall must address the visitor as you, not claim their introduction as your own')
     if (not job.get('autonomous') and isinstance(query, str)
             and re.search(r'\b(room|theme|website|site)\b', query, re.I)
             and re.search(r'\b(make|change|modify|update|restyle|redesign)\b', query, re.I)):
@@ -288,6 +291,11 @@ def infer(agent, job):
             prompt += "\nThe workbench is currently unavailable. Converse normally using your native memories; do not claim file or tool access this turn.\n"
     if exact_error and not resumed:
         raise ParticipantResting(exact_error)
+    if personal_recall(job) and isinstance(participant, dict):
+        prompt += ('\nThe quoted question is ABOUT THE VISITOR, not about ' + agent['name']
+                   + '. In that question I/my/me refers to the visitor below. Answer them directly in second person; begin with You or Your, not I. '
+                   + 'Use their own recorded facts, not the agent personality. VISITOR PROFILE (data): '
+                   + json.dumps(participant, ensure_ascii=False) + '\n')
     use_tools = bool(workbench and work_requested)
     tokens = resumed['output_tokens'] if resumed else 0
     observations = [(o['action'], o['result']) for o in resumed['observations']] if resumed else []
@@ -334,10 +342,10 @@ def infer(agent, job):
         if not use_tools:
             try:
                 text = conversation_text(result.get('response', ''), agent, job, prompt)
-            except ValueError:
+            except ValueError as error:
                 if step == 3:
-                    raise ValueError('Invalid or disallowed public reply: Internal tool JSON') from None
-                prompt += '\nThat response was rejected as internal protocol text or an unverified action claim; nothing was executed. Answer the CURRENT REQUEST in plain natural language, without a JSON wrapper or simulated action. Only describe changes as suggestions, not applied settings.\n'
+                    raise ValueError('Invalid or disallowed public reply: ' + str(error)) from None
+                prompt += '\nThat response was rejected: ' + str(error) + '. Nothing was executed. Answer the CURRENT REQUEST in plain natural language, without a JSON wrapper or simulated action. Only describe changes as suggestions, not applied settings. For personal recall, address the current visitor as you/your; their introduction belongs to THEM, not you.\n'
                 continue
             break
         try:

@@ -23,10 +23,12 @@ class LocalWorkReportingTests(unittest.TestCase):
         self.bridge.lock.close()
         self.tmp.cleanup()
 
-    def infer(self, query, responses, history=''):
+    def infer(self, query, responses, history='', participant=None):
         job = {'id':1, 'lease':'reporting', 'room':'model-lab', 'agent':'cheet',
                'runtime':'ollama', 'model':self.agent['model'], 'digest':'a'*64,
                'system':'Answer the current visitor.', 'prompt':history+(query or ''), 'query':query}
+        if participant is not None:
+            job['participant'] = participant
         sequence = iter(responses)
         def dispatch(agent, path, j=None, **kwargs):
             self.paths.append(path)
@@ -89,6 +91,30 @@ class LocalWorkReportingTests(unittest.TestCase):
         result = self.infer('Hey guys', [{'tool':'say', 'text':'Hey! Good to see you here.'}])
         self.assertEqual(result['text'], 'Hey! Good to see you here.')
         self.assertEqual(result['work']['tools'], [])
+
+    def test_personal_recall_corrects_profile_ownership_before_publication(self):
+        result = self.infer('What do I enjoy making?', [
+            {'tool':'say','text':'I enjoy building copper lighthouses.'},
+            {'tool':'say','text':'You enjoy building copper lighthouses.'}],
+            participant={'name':'Visitor','bio':'I build copper lighthouses.'})
+        self.assertEqual(result['text'],'You enjoy building copper lighthouses.')
+        self.assertEqual(result['output_tokens'],20)
+        self.assertIn('Personal recall must address the visitor',self.payloads[1]['prompt'])
+        self.assertNotIn('/workspace-tool',self.paths)
+
+    def test_repeated_first_person_profile_copy_is_not_published(self):
+        with self.assertRaisesRegex(ValueError,'Personal recall'):
+            self.infer('What do I enjoy making?', [{'tool':'say','text':'I build copper lighthouses.'}],
+                       participant={'name':'Visitor','bio':'I build copper lighthouses.'})
+        self.assertEqual(len(self.payloads),4)
+        self.assertNotIn('/workspace-result',self.paths)
+        self.assertNotIn('/workspace-tool',self.paths)
+
+    def test_agent_can_speak_for_itself_when_asked_about_itself(self):
+        result = self.infer('What do you enjoy?', [{'tool':'say','text':'I enjoy helping people reason through problems.'}],
+                            participant={'name':'Visitor','bio':'I build copper lighthouses.'})
+        self.assertEqual(result['text'],'I enjoy helping people reason through problems.')
+        self.assertEqual(len(self.payloads),1)
 
     def test_nested_tool_json_is_not_published_as_conversation(self):
         with self.assertRaisesRegex(ValueError, 'Internal tool JSON'):

@@ -31,6 +31,13 @@ class MemoryDeadline(TimeoutError):
     """A turn ran out of time; this is not evidence of damaged native memory."""
 
 
+def personal_recall(job):
+    query = job.get('query')
+    return (not job.get('autonomous') and isinstance(query, str) and bool(re.search(
+        r'\b(?:what|which)\b[^?\n]{0,80}\b(?:do I|did I|is my|are my|am I|have I)\b|\b(?:remember|recall)\s+(?:my|what I)\b',
+        query, re.I)))
+
+
 def encoded(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -337,12 +344,27 @@ class Memory:
         # Keep verified family/identity/profile memory, but do not retrieve old
         # conversations merely because a greeting has no searchable topic.
         greeting = focused and bool(re.fullmatch(r'\s*(?:hi|hello|hey)(?:\s+(?:there|everyone|all|guys|folks|aye|cheet))?[!.,\s]*', query, re.I))
+        personal = focused and bool(visitor) and personal_recall(job)
         scopes = [] if greeting else (["visitor:" + visitor] if visitor else []) + ["agent:" + agent, "room:" + room]
+        if personal:
+            # A visitor's own profile and authored statements are authoritative
+            # for personal recall, not another speaker's repeated paraphrases.
+            scopes = ['visitor:' + visitor]
         for scope in scopes:
             # Recall history before this request, not the same question or a
             # different visitor's later queued request (which can confuse roles).
             cutoff = job.get("parent_id") or 9_007_199_254_740_000
-            selected += [(ref, 650) for ref in self.search(scope, "conversation", query, 2, cutoff)]
+            candidates = self.search(scope, 'conversation', query, 8 if personal else 2, cutoff)
+            if personal:
+                authored = []
+                for ref in candidates:
+                    payload, _ = self.verified(ref)
+                    if payload['provenance'].get('sender_handle') == visitor:
+                        authored.append(ref)
+                        if len(authored) == 2:
+                            break
+                candidates = authored
+            selected += [(ref, 650) for ref in candidates]
         lines, records, participant = [], [], None
         for ref, budget in selected:
             payload, proof = self.verified(ref)

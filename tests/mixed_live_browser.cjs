@@ -69,7 +69,7 @@ const preserve = () => fs.writeFileSync(path.join(root,'result.json'),JSON.strin
       }
       if(agent==='aye') {
         assert(reply.text.toLowerCase().includes('copper lighthouse'));
-        assert(reply.text.toLowerCase().includes('life long learning'));
+        assert(/life\s*long learning/i.test(reply.text));
         assert(!/\bi (enjoy|build|make)\b/i.test(reply.text),'Visitor hobbies must remain attributed to the visitor');
       }
       console.log(JSON.stringify({agent,id:reply.id,origin:reply.origin,model:reply.model,artifacts:reply.work?.artifacts.map(a=>a.path)}));
