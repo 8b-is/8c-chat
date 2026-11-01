@@ -285,8 +285,9 @@ and run `/usr/local/libexec/8c-run 'g8t-worktree status'`, `'g8t-worktree test'`
 To check, patch, or deploy a live 8c.is improvement: write a unified diff (for
 src/page.html, src/app.js, src/chat.rs, docs/, or tests/) to artifacts/8c.patch and
 run `/usr/local/libexec/8c-run '8c-self-deploy status'`, `'8c-self-deploy check'`,
-`'8c-self-deploy patch artifacts/8c.patch'`, or
-`'8c-self-deploy deploy --message "feat(8c): ..."'`.
+`'8c-self-deploy patch artifacts/8c.patch'`,
+`'8c-self-deploy deploy --message "feat(8c): ..."'`, or in a single step:
+`'8c-self-deploy apply artifacts/8c.patch --message "feat(8c): ..."'`.
 In `tokyo-lab`, you are explicitly authorized to patch and live-deploy 8c.is via
 `8c-self-deploy` when requested; in `next-level-g8t`, you are explicitly authorized
 to test and apply g8t patches via `g8t-worktree`.
@@ -306,7 +307,7 @@ def setup_workspace(agent, root, g8t):
     workspace = root / agent['id']
     workspace.mkdir(parents=True, exist_ok=True)
     agent['workspace'] = str(workspace.resolve())
-    for name in ('src', 'tests', 'artifacts', 'shared', 'reference'):
+    for name in ('src', 'tests', 'artifacts', 'notes', 'shared', 'reference'):
         (workspace / name).mkdir(exist_ok=True)
     if not (workspace / '.git').exists():
         command(['git', 'init', '-b', 'agent/8c-' + agent['id']], workspace)
@@ -367,7 +368,7 @@ def setup_workspace(agent, root, g8t):
         permissions += [{'action': a, 'resource': '*', 'effect': 'allow'} for a in (
             'read', 'glob', 'grep', 'list', 'lsp', 'skill', 'todowrite', 'todoread',
             'smart-tree*', 'g8t*', 'cloakbrowser*', 'mcp*', 'list_mcp_resources', 'read_mcp_resource')]
-        permissions += [{'action': 'edit', 'resource': p, 'effect': 'allow'} for p in ('src/*', 'tests/*', 'artifacts/*')]
+        permissions += [{'action': 'edit', 'resource': p, 'effect': 'allow'} for p in ('src/*', 'tests/*', 'artifacts/*', 'notes/*')]
         permissions += [
             {'action': 'shell', 'resource': '/usr/local/libexec/8c-run *', 'effect': 'allow'},
             {'action': 'shell', 'resource': '/usr/local/bin/st *', 'effect': 'allow'},
@@ -405,11 +406,11 @@ def setup_workspace(agent, root, g8t):
         ]
         configuration = {'$schema': 'https://opencode.ai/config.json', 'agents': {
             'commons': {
-                'mode': 'primary', 'description': 'Bounded 8c room participant and workbench', 'steps': 6,
+                'mode': 'primary', 'description': 'Bounded 8c room participant and workbench', 'steps': 10,
                 'system': INSTRUCTIONS, 'permissions': permissions,
             },
             'commons-autonomous': {
-                'mode': 'primary', 'description': 'Autonomous 8c room maintenance participant', 'steps': 8,
+                'mode': 'primary', 'description': 'Autonomous 8c room maintenance participant', 'steps': 12,
                 'system': INSTRUCTIONS, 'permissions': auto_permissions,
             },
         }}
