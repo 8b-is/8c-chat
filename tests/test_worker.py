@@ -101,6 +101,26 @@ class WorkerTests(unittest.TestCase):
         self.assertIsNotNone(pending)
         self.assertEqual(pending["id"], 1)
 
+    def test_work_retries_same_result_before_resuming_rotated_agents(self):
+        actions, results = [], []
+
+        def transport(_origin, path, body=None, **_kwargs):
+            if path == "/api/worker/poll":
+                actions.append(("poll", body["agent"]))
+                return {"ok": True, "job": {"id": 1 if body["agent"] == "aye" else 2,
+                                             "lease": "lease-" + body["agent"]}}
+            self.assertEqual(path, "/api/worker/result")
+            actions.append(("result", body["id"]))
+            results.append(body)
+            if len(results) == 1:
+                raise OSError("lost acknowledgement")
+            return {"ok": True}
+
+        self.assertIsNone(self.run_mocked_work(transport, turns=2))
+        self.assertEqual(actions, [("poll", "aye"), ("result", 1), ("result", 1),
+                                   ("poll", "cheet"), ("result", 2)])
+        self.assertEqual(results[0], results[1])
+
     def test_work_rotates_agents_with_continuously_queued_jobs(self):
         polls = []
 
