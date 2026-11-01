@@ -15,12 +15,13 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from commons import artifacts, file_at, sha, tool
 from funding import Pool, RESERVATION
-from worker import request, save
+from worker import request, save, turn_deadline, work_report
 
 MAX_OUTPUT = 4_194_304
 RESTING = 'Pricey, but worth it ✨ — resting for a little recharge.'
@@ -34,13 +35,19 @@ class BudgetPause(ValueError):
     pass
 
 
+class RecoveryRequired(ValueError):
+    """Prior effects are retained; a new lease must not repeat the operation."""
+
+
 def budget_error(value):
     text = json.dumps(value).lower()
     return any(s in text for s in ('insufficient_quota', 'rate_limit', 'rate limit', 'resource_exhausted', 'quota exceeded', 'usage limit', 'insufficient credits', 'credit balance', 'payment required', 'too many requests'))
 
 
-def command(args, directory, timeout=20, payload=None):
+def command(args, directory, timeout=20, payload=None, connection_env=None):
     env = {k: v for k, v in os.environ.items() if k not in ('WORKER_KEY', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET')}
+    if connection_env:
+        env.update(connection_env)
     with tempfile.TemporaryFile(dir='/tmp/opencode') as out, tempfile.TemporaryFile(dir='/tmp/opencode') as err:
         process = subprocess.Popen(args, cwd=directory, env=env, stdin=subprocess.PIPE if payload else subprocess.DEVNULL,
                                    stdout=out, stderr=err, start_new_session=True)
@@ -62,24 +69,118 @@ def command(args, directory, timeout=20, payload=None):
 
 
 def api(agent, method, path, body=None, timeout=20):
-    args = [agent['binary'], 'api', method, path]
+    # Explicit --server bypasses OpenCode's automatic connection credentials.
+    # Reference its existing private service record, passing only the loopback
+    # password through the child environment, never argv or a durable receipt.
+    from worker import endpoint
+    state = Path(os.environ.get('XDG_STATE_HOME', str(Path.home()/'.local/state')))
+    service_file = Path(agent.get('opencode_service_file', state/'opencode/service.json'))
+    metadata = service_file.stat()
+    if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o022 or metadata.st_size > 16_384:
+        raise ValueError('OpenCode service reference must be bounded, owned by this user and not writable by others')
+    service = json.loads(service_file.read_text())
+    if not isinstance(service, dict) or type(service.get('pid')) is not int or service['pid'] <= 0:
+        raise ValueError('Invalid OpenCode service reference')
+    url, password = service.get('url'), service.get('password')
+    if not isinstance(url, str) or not isinstance(password, str) or not password:
+        raise ValueError('OpenCode service connection is incomplete')
+    endpoint(url, inference=True)
+    if agent.get('opencode_server', url) != url or agent.get('opencode_pid', service['pid']) != service['pid']:
+        raise ValueError('OpenCode service reference changed; retain ownership for recovery')
+    args = [agent['binary'], 'api', method, path, '--server', url]
     if body is not None:
         args += ['--data', json.dumps(body)]
-    raw = command(args, agent['workspace'], timeout)
-    return json.loads(raw, parse_float=str) if raw.strip() else None
+    raw = command(args, agent['workspace'], timeout, connection_env={'OPENCODE_PASSWORD': password})
+    value = json.loads(raw, parse_float=str) if raw.strip() else None
+    if path == '/api/info' and (not isinstance(value, dict) or value.get('pid') != service['pid']):
+        raise ValueError('OpenCode service process does not match its connection record')
+    return value
+
+
+def server_identity(agent, timeout=5):
+    """Pin the authenticated process, not whichever server a later CLI discovers."""
+    from worker import endpoint
+    if agent.get('opencode_server'):
+        endpoint(agent['opencode_server'], inference=True)
+    info = api(agent, 'get', '/api/info', timeout=timeout)
+    if not isinstance(info, dict) or type(info.get('pid')) is not int or info['pid'] <= 0:
+        raise ValueError('Invalid OpenCode server identity')
+    urls = info.get('urls')
+    if not isinstance(urls, list) or not urls or not all(isinstance(url, str) for url in urls):
+        raise ValueError('Invalid OpenCode server addresses')
+    origin = agent.get('opencode_server', urls[0])
+    endpoint(origin, inference=True)
+    if origin not in urls:
+        raise ValueError('OpenCode server address changed')
+    return {'pid': info['pid'], 'url': origin}
+
+
+def recover_active(agent, deadline=None):
+    """Retain uncertain ownership until the same server confirms inactivity."""
+    active = Path(agent['active_file']) if agent.get('active_file') else None
+    if active is None or not active.exists():
+        return
+    saved = json.loads(active.read_text())
+    session, server = saved.get('session'), saved.get('server')
+    if not isinstance(session, str) or not re.fullmatch(r'ses_[A-Za-z0-9]+', session):
+        raise ValueError('Invalid active session receipt')
+    if not isinstance(server, dict) or type(server.get('pid')) is not int or not isinstance(server.get('url'), str):
+        raise ValueError('Legacy active receipt needs operator recovery; server identity is unknown')
+    deadline = min(deadline or 2**63-1, time.monotonic_ns() + 10_000_000_000)
+    def timeout():
+        remaining = (deadline - time.monotonic_ns()) // 1_000_000_000
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired('OpenCode recovery', 10)
+        return min(5, remaining)
+    client = {**agent, 'opencode_server': server['url'], 'opencode_pid': server['pid']}
+    if server_identity(client, timeout()) != server:
+        raise ValueError('OpenCode process changed; retain active receipt for operator recovery')
+    try:
+        stopped = api(client, 'post', f'/api/session/{session}/interrupt', timeout=timeout())
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        # Transport failure is not proof either way. A fresh same-process
+        # activity snapshot can still establish that foreground work stopped.
+        stopped = None
+    else:
+        if not isinstance(stopped, dict) or type(stopped.get('interrupted')) is not bool:
+            raise ValueError('Invalid OpenCode interruption response')
+    current = api(client, 'get', '/api/session/active', timeout=timeout())
+    running = current.get('data') if isinstance(current, dict) else None
+    if not isinstance(running, dict) or any(
+            not re.fullmatch(r'ses_[A-Za-z0-9]+', key) or value != {'type': 'running'}
+            for key, value in running.items()):
+        raise ValueError('Invalid OpenCode active-session response')
+    if session in running:
+        raise ValueError('Previous OpenCode turn is still running; new work is quarantined')
+    if server_identity(client, timeout()) != server:
+        raise ValueError('OpenCode process changed during recovery')
+    active.unlink()
 
 
 def opencode(agent, prompt):
     model = {'providerID': agent['provider'], 'id': agent['model'], 'variant': agent.get('variant', 'low')}
-    session = api(agent, 'post', '/api/session', {'title': '8c ' + agent['name'] + ' paced turn', 'agent': agent.get('profile', 'commons'),
+    deadline = min(time.monotonic_ns() + 85_000_000_000, agent.get('turn_deadline_ns', 2**63-1))
+    if not agent.get('active_file'):
+        raise ValueError('Hosted turns require a durable active-session receipt')
+    recover_active(agent, deadline)
+    remaining = (deadline - time.monotonic_ns()) // 1_000_000_000
+    if remaining <= 0:
+        raise subprocess.TimeoutExpired('OpenCode turn', 85)
+    server = server_identity(agent, min(5, remaining))
+    agent = {**agent, 'opencode_server': server['url'], 'opencode_pid': server['pid']}
+    def call(method, path, body=None, timeout=20):
+        remaining = (deadline - time.monotonic_ns()) // 1_000_000_000
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired('OpenCode turn', 85)
+        return api(agent, method, path, body, min(timeout, remaining))
+    session = call('post', '/api/session', {'title': '8c ' + agent['name'] + ' paced turn', 'agent': agent.get('profile', 'commons'),
                   'model': model, 'location': {'directory': agent['workspace']}})['data']['id']
-    active = Path(agent['active_file']) if agent.get('active_file') else None
-    if active:
-        save(active, {'session': session})
+    active = Path(agent['active_file'])
+    save(active, {'session': session, 'server': server})
     try:
-        api(agent, 'post', f'/api/session/{session}/prompt', {'text': prompt})
-        api(agent, 'post', f'/api/experimental/session/{session}/wait', timeout=85)
-        response = api(agent, 'get', f'/api/session/{session}/message?limit=40&order=desc')
+        call('post', f'/api/session/{session}/prompt', {'text': prompt})
+        call('post', f'/api/experimental/session/{session}/wait', timeout=85)
+        response = call('get', f'/api/session/{session}/message?limit=40&order=desc')
         messages = [m for m in response['data'] if m['type'] == 'assistant']
         if not messages or len(response['data']) >= 40:
             raise ValueError('Session did not finish within the bounded transcript')
@@ -99,20 +200,28 @@ def opencode(agent, prompt):
         cost = sum((Fraction(str(m.get('cost', 0))) for m in messages), Fraction(0))
         return text, session, tokens, tools, str(cost)
     finally:
-        api(agent, 'post', f'/api/session/{session}/interrupt')
-        if active:
-            active.unlink()
+        original = sys.exc_info()[1]
+        try:
+            recover_active(agent, agent.get('response_deadline_ns'))
+        except Exception as recovery_error:
+            if original is None:
+                raise
+            # Preserve the generation failure while leaving ownership durable.
+            print('OpenCode recovery remains uncertain: ' + type(recovery_error).__name__, file=sys.stderr, flush=True)
 
 
 def agy(agent, prompt):
+    timeout = min(95, (agent.get('turn_deadline_ns', time.monotonic_ns()+95_000_000_000)-time.monotonic_ns())//1_000_000_000)
+    if timeout <= 5:
+        raise subprocess.TimeoutExpired('agy turn',95)
     settings = {'toolPermission': 'request-review', 'allowNonWorkspaceAccess': False,
                 'permissions': {'allow': ['command(/usr/local/libexec/8c-run)', 'read_url(g8t.is)'],
                                 'deny': ['mcp(*)', 'execute_url(*)', 'write_file(.git/)', 'write_file(.agents/)',
                                          'write_file(.opencode/)', 'write_file(AGENTS.md)', 'write_file(reference/)', 'write_file(shared/)']}}
     args = [agent['binary'], '--model', agent['model'], '--sandbox', '--mode', 'accept-edits',
             '--settings', json.dumps(settings), '--disable-slash-commands', '--output-format', 'stream-json',
-            '--input-format', 'stream-json', '--print-timeout', '95s']
-    raw = command(args, agent['workspace'], 105, json.dumps({'event': 'user', 'message': {'content': prompt}}) + '\n')
+            '--input-format', 'stream-json', '--print-timeout', str(timeout-5)+'s']
+    raw = command(args, agent['workspace'], timeout, json.dumps({'event': 'user', 'message': {'content': prompt}}) + '\n')
     events = [json.loads(line, parse_float=str) for line in raw.splitlines() if line.strip()]
     initial = next(e['init'] for e in events if e['event'] == 'init')
     result = next(e['result'] for e in reversed(events) if e['event'] == 'result')
@@ -205,24 +314,48 @@ class Bridge:
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = (self.root / 'bridge.lock').open('a')
         fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        self.agents = {a['id']: setup_workspace(dict(a), self.root, config.get('g8t_source')) for a in config['agents']}
         self.state = self.root / 'receipts'
         self.state.mkdir(exist_ok=True)
+        self.anchors = self.state / 'anchors'
+        self.anchors.mkdir(exist_ok=True)
+        marker = self.state / 'anchors-version.json'
+        if marker.exists():
+            if json.loads(marker.read_text()).get('version') != 1:
+                raise ValueError('Unknown job-anchor metadata version')
+            self.migration_required = False
+        else:
+            self.migration_required = any(re.fullmatch(r'[a-f0-9]{64}(?:-work|-attempt)?\.json', p.name) for p in self.state.iterdir())
+            if not self.migration_required:
+                save(marker, {'version': 1, 'legacy_migration': False})
+        self.g8t_source = config.get('g8t_source')
+        self.agents = {}
+        self.initialized = set()
         self.pool = Pool(config.get('funding_snapshot'), self.root / 'funding-reservations')
-        for agent in self.agents.values():
+        for configured in config['agents']:
+            agent = dict(configured)
+            agent['workspace'] = str(self.root / agent['id'])
             active = self.state / ('active-' + agent['id'] + '.json')
             agent['active_file'] = str(active)
-            if active.exists():
-                session = json.loads(active.read_text())['session']
-                if not re.fullmatch(r'ses_[A-Za-z0-9]+', session):
-                    raise ValueError('Invalid active session receipt')
-                client = {**agent, 'binary': agent.get('opencode_binary', '/usr/bin/opencode')}
-                api(client, 'post', f'/api/session/{session}/interrupt')
-                active.unlink()
+            self.agents[agent['id']] = agent
+            # Do not rewrite a workspace while its former foreground owner is
+            # unresolved. One quarantined participant must not stop its peers.
+            if not active.exists():
+                setup_workspace(agent, self.root, self.g8t_source)
+                self.initialized.add(agent['id'])
         self.snapshot_at = 0
         self.snapshot = {}
 
+    def ensure_idle(self, agent):
+        client = {**agent, 'binary': agent.get('opencode_binary', agent.get('binary', '/usr/bin/opencode'))}
+        if agent['runtime'] != 'opencode':
+            client['binary'] = agent.get('opencode_binary', '/usr/bin/opencode')
+        recover_active(client, agent.get('turn_deadline_ns'))
+        if agent['id'] not in self.initialized:
+            setup_workspace(agent, self.root, self.g8t_source)
+            self.initialized.add(agent['id'])
+
     def prepare(self, agent):
+        self.ensure_idle(agent)
         if time.monotonic_ns() - self.snapshot_at > 900_000_000_000:
             observed = now()
             try:
@@ -252,16 +385,65 @@ class Bridge:
         (directory / 'shared' / 'index.json').write_text(json.dumps(index))
         return '\nWorkbench: reference/g8t-live.json contains ' + json.dumps(self.snapshot) + '. Read shared/index.json for peer artifacts.\n'
 
+    def anchor_path(self, agent, job):
+        if type(job.get('id')) is not int or job['id'] <= 0:
+            raise ValueError('Invalid durable job identity')
+        return self.anchors / (sha(json.dumps([agent['id'], job['id']], separators=(',', ':')).encode()) + '.json')
+
+    def read_anchor(self, agent, job):
+        path = self.anchor_path(agent, job)
+        if not path.exists():
+            return None
+        anchor = json.loads(path.read_text())
+        if (anchor.get('version') != 1 or anchor.get('agent') != agent['id'] or anchor.get('job_id') != job['id']
+                or anchor.get('room') != job['room'] or anchor.get('model') != agent['model'] or anchor.get('runtime') != agent['runtime']
+                or anchor.get('state') not in ('active', 'accepted', 'blocked')
+                or not isinstance(anchor.get('key'), str) or not re.fullmatch('[a-f0-9]{64}', anchor['key'])):
+            raise RecoveryRequired('Durable job identity conflict; original work retained')
+        return anchor
+
     def key(self, agent, job):
-        return sha(json.dumps([agent['id'], job['id'], job['lease']], separators=(',', ':')).encode())
+        anchor = self.read_anchor(agent, job)
+        return anchor['key'] if anchor else sha(json.dumps([agent['id'], job['id'], job['lease']], separators=(',', ':')).encode())
+
+    def bind_job(self, agent, job, accepting=False):
+        if self.migration_required:
+            raise RecoveryRequired('Legacy receipts require a verified offline journal migration')
+        anchor = self.read_anchor(agent, job)
+        if anchor is None:
+            if accepting:
+                raise RecoveryRequired('Cannot accept an unknown durable job')
+            key = self.key(agent, job)
+            anchor = {'version': 1, 'agent': agent['id'], 'job_id': job['id'], 'room': job['room'],
+                      'model': agent['model'], 'runtime': agent['runtime'], 'key': key,
+                      'first_key': key, 'legacy_keys': [key], 'state': 'active'}
+            save(self.anchor_path(agent, job), anchor)
+        if anchor['state'] == 'blocked':
+            raise RecoveryRequired('Previous work is quarantined; this job cannot execute again')
+        return anchor
 
     def local_work(self, path, agent, job, key, receipt_path):
+        # Finalization freezes the whole generation, not just its artifact list.
+        # A retry must publish exactly the text later shared with peers and must
+        # never execute another action under an already finalized lease.
+        if receipt_path.exists():
+            if path not in ('/workspace-start', '/workspace-result'):
+                raise ValueError('Finalized work cannot execute more tools')
+            saved = json.loads(receipt_path.read_text())
+            return {'ok': True, 'generation': saved, 'work': saved['work']}
         state_path = self.state / (key + '-work.json')
         if path == '/workspace-start':
-            context = self.prepare(agent)
             if not state_path.exists():
-                save(state_path, {'before': artifacts(agent['workspace']), 'actions': [], 'context': context})
-            return {'ok': True, 'context': json.loads(state_path.read_text())['context']}
+                context = self.prepare(agent)
+                save(state_path, {'before': artifacts(agent['workspace']), 'actions': [], 'context': context, 'digest': job.get('digest', '')})
+            saved = json.loads(state_path.read_text())
+            resume = None
+            if saved['actions']:
+                if any('result' not in a or 'action' not in a for a in saved['actions']):
+                    raise RecoveryRequired('Uncertain or legacy action requires recovery; not re-executed')
+                resume = {'observations': [{'action': a['action'], 'result': a['result']} for a in saved['actions']],
+                          'digest': saved.get('digest', ''), **saved.get('progress', {'output_tokens': 0, 'elapsed_ms': 0})}
+            return {'ok': True, 'context': saved['context'], 'resume': resume}
         state = json.loads(state_path.read_text())
         if path == '/workspace-tool':
             sequence, action = job['sequence'], job['action']
@@ -271,28 +453,45 @@ class Bridge:
             if sequence < len(state['actions']):
                 previous = state['actions'][sequence]
                 if previous['identity'] != identity or 'result' not in previous:
-                    raise ValueError('Tool replay requires recovery; not re-executed')
+                    raise RecoveryRequired('Tool replay requires recovery; not re-executed')
                 return {'ok': True, 'result': previous['result']}
             if sequence != len(state['actions']):
                 raise ValueError('Tool sequence mismatch')
-            entry = {'identity': identity, 'name': action['tool']}
+            requested_key = sha(json.dumps([agent['id'], job['id'], job['lease']], separators=(',', ':')).encode())
+            if requested_key != key:
+                raise RecoveryRequired('A retry lease may recover earlier effects, not execute more actions')
+            deadline = job.get('work_deadline_ns')
+            if type(deadline) is not int or not 25_000_000_000 <= deadline - time.monotonic_ns() <= 100_000_000_000:
+                raise ValueError('No tool started: insufficient or invalid deadline headroom')
+            progress = job.get('progress', {'output_tokens': 0, 'elapsed_ms': 0})
+            if not isinstance(progress, dict) or any(type(progress.get(k)) is not int or progress[k] < 0 for k in ('output_tokens', 'elapsed_ms')):
+                raise ValueError('Invalid observed generation progress')
+            entry = {'identity': identity, 'name': action['tool'], 'action': action}
             state['actions'].append(entry)
             save(state_path, state)  # An interrupted operation is never blindly replayed.
-            result = tool(Path(agent['workspace']), action)
+            began = time.monotonic_ns()
+            result = tool(Path(agent['workspace']), action, deadline)
+            state['progress'] = {'output_tokens': progress['output_tokens'],
+                                 'elapsed_ms': progress['elapsed_ms'] + (time.monotonic_ns() - began) // 1_000_000}
             entry.update(result=result, status='error' if result.get('exit_code', 0) else 'completed')
             save(state_path, state)
             return {'ok': True, 'result': result}
         if path != '/workspace-result':
             raise ValueError('Unknown workspace operation')
-        if receipt_path.exists():
-            return {'ok': True, 'work': json.loads(receipt_path.read_text())['work']}
+        if any('result' not in action for action in state['actions']):
+            raise RecoveryRequired('Uncertain tool action requires recovery before finalization')
         changed = [v for k, v in artifacts(agent['workspace']).items() if state['before'].get(k) != v]
         if len(changed) > 2 or sum(a['bytes'] for a in changed) > 20_000:
             raise ValueError('Work artifact budget exceeded')
         work = {'workspace': '8c-commons/' + agent['id'], 'tools': [{'name': a['name'], 'status': a['status']} for a in state['actions']],
                 'artifacts': changed, 'g8t': self.snapshot}
-        save(receipt_path, {**job['generation'], 'work': work})
-        return {'ok': True, 'work': work}
+        generation = {**job['generation'], 'work': work}
+        if state['actions']:
+            if any('action' not in action for action in state['actions']):
+                raise RecoveryRequired('Legacy actions require reconciliation before finalization')
+            generation['text'] = work_report([(a['action'], a['result']) for a in state['actions']])
+        save(receipt_path, generation)
+        return {'ok': True, 'generation': generation, 'work': work}
 
     def handle(self, path, body):
         agent = self.agents[body['agent']]
@@ -304,10 +503,12 @@ class Bridge:
         funded_until = json.loads(funded_pause.read_text())['until'] if funded_pause.exists() else 0
         funded = bool(agent.get('fallback_model')) and now() >= funded_until and self.pool.available() >= RESERVATION
         if path == '/inventory':
-            available = now() >= until or funded
-            return {'ok': True, 'digest': '', 'available': available, 'pause': '' if available else 'budget', 'workspace': '8c-commons/' + agent['id']}
+            available = not self.migration_required and (now() >= until or funded)
+            pause = 'recovery' if self.migration_required else ('' if available else 'budget')
+            return {'ok': True, 'digest': '', 'available': available, 'pause': pause, 'workspace': '8c-commons/' + agent['id']}
         job = body['job']
-        key = self.key(agent, job)
+        anchor = self.bind_job(agent, job, accepting=path == '/accept')
+        key = anchor['key']
         receipt_path = self.state / (key + '.json')
         if path.startswith('/workspace-'):
             return self.local_work(path, agent, job, key, receipt_path)
@@ -321,6 +522,8 @@ class Bridge:
             if target.exists() and json.loads(target.read_text()) != public:
                 raise ValueError('Accepted artifact conflict')
             save(target, public)
+            if anchor['state'] != 'accepted':
+                save(self.anchor_path(agent, job), {**anchor, 'state': 'accepted'})
             return {'ok': True}
         if path != '/infer':
             raise ValueError('Unknown bridge operation')
@@ -330,11 +533,19 @@ class Bridge:
             return {'ok': True, **json.loads(receipt_path.read_text())}
         if now() < until and not funded:
             return {'ok': False, 'pause': 'budget', 'error': RESTING}
+        start = time.monotonic_ns()
+        # Include recovery, preparation and a possible primary/funded switch in
+        # one deadline; ten seconds remain for final OpenCode cleanup.
+        response_deadline = turn_deadline(job, 107)
+        execution_deadline = min(start + 95_000_000_000, response_deadline - 12_000_000_000)
+        if execution_deadline - time.monotonic_ns() < 5_000_000_000:
+            raise ValueError('Insufficient hosted execution and cleanup headroom')
+        agent = {**agent, 'turn_deadline_ns': execution_deadline, 'response_deadline_ns': response_deadline}
+        self.ensure_idle(agent)
         attempt = self.state / (key + '-attempt.json')
         if attempt.exists():
-            raise ValueError('An interrupted turn needs a new chat lease; not re-executed')
+            raise RecoveryRequired('An interrupted hosted turn requires recovery; a new lease cannot repeat it')
         save(attempt, {'agent': agent['id'], 'job': job['id'], 'started_at': time.time_ns() // 1_000_000_000})
-        start = time.monotonic_ns()
         before = artifacts(agent['workspace'])
         extra = self.prepare(agent)
         prompt = INSTRUCTIONS + '\n' + job['system'] + '\n' + job['prompt'] + extra
@@ -391,6 +602,8 @@ def serve(config, root, port):
                 if not hmac.compare_digest(body.pop('worker_key', ''), key):
                     raise ValueError('Authentication failed')
                 result = bridge.handle(self.path, body)
+            except RecoveryRequired:
+                result = {'ok': False, 'pause': 'recovery', 'error': 'Previous work is preserved for recovery; this request has not been repeated.'}
             except Exception as error:
                 print('Bridge operation: ' + type(error).__name__, flush=True)
                 result = {'ok': False, 'error': 'Participant is resting; your message is saved. Please retry shortly.'}

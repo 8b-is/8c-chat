@@ -26,8 +26,15 @@ def file_at(root, name):
     return target
 
 
-def run(directory, command):
+def run(directory, command, deadline_ns=None):
     """A command sees its workspace and system tools, no host home or network."""
+    timeout = 20
+    if deadline_ns is not None:
+        if type(deadline_ns) is not int:
+            raise ValueError('Invalid command deadline')
+        timeout = min(timeout, (deadline_ns - time.monotonic_ns()) // 1_000_000_000)
+        if timeout <= 0:
+            raise ValueError('Command deadline expired before execution')
     directory = Path(directory).resolve(strict=True)
     if len(command) > 2000:
         raise ValueError('Command too long')
@@ -50,16 +57,18 @@ def run(directory, command):
     import tempfile
     with tempfile.TemporaryFile(dir='/tmp/opencode') as output:
         process = subprocess.Popen(args, stdout=output, stderr=subprocess.STDOUT, preexec_fn=limits, start_new_session=True)
+        timed_out = False
         try:
-            process.wait(timeout=20)
+            process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             import signal
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
-            raise ValueError('Workbench command exceeded 20 seconds')
+            timed_out = True  # Partial effects are retained and must not be repeated.
         output.seek(0)
         text = output.read(FILE_LIMIT + 1)
-    return {'exit_code': process.returncode, 'output': text[:FILE_LIMIT].decode(errors='replace'), 'truncated': len(text) > FILE_LIMIT}
+    return {'exit_code': process.returncode, 'output': text[:FILE_LIMIT].decode(errors='replace'),
+            'truncated': len(text) > FILE_LIMIT, 'timed_out': timed_out}
 
 
 def artifacts(directory):
@@ -85,13 +94,15 @@ def artifacts(directory):
     return result
 
 
-def tool(directory, action):
+def tool(directory, action, deadline_ns=None):
+    if deadline_ns is not None and (type(deadline_ns) is not int or time.monotonic_ns() >= deadline_ns):
+        raise ValueError('Tool deadline expired before execution')
     root = Path(directory)
     name = action['tool']
     if name == 'list':
         return {'files': sorted(p.relative_to(root).as_posix() for p in root.glob('*') if not p.name.startswith('.'))[:128]}
     if name == 'run':
-        return run(root, action['command'])
+        return run(root, action['command'], deadline_ns)
     path = file_at(root, action['path'])
     if name == 'read':
         if path.stat().st_size > 65_536:
@@ -105,7 +116,10 @@ def tool(directory, action):
             raise ValueError('Write exceeds 16 KiB')
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(raw)
-        return {'path': action['path'], 'sha256': sha(raw)}
+        observed = path.read_bytes()
+        if observed != raw:
+            raise ValueError('Written file readback did not match requested bytes')
+        return {'path': action['path'], 'sha256': sha(observed)}
     raise ValueError('Unknown workbench tool')
 
 

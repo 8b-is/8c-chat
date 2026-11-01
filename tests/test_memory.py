@@ -42,7 +42,26 @@ class NativeMemoryTests(unittest.TestCase):
                             "sender_kind": "human", "text": text, "origin": "participant", "timestamp_secs": 1}}
 
     def job(self, agent="aye", visitor="eva", room="model-lab", query="What keepsake did I tell you about earlier? Name the object and material in one short sentence."):
-        return {"id": 80, "parent_id": 999, "agent": agent, "room": room, "requester": visitor, "prompt": query, "query": query}
+        return {"id": 80, "parent_id": 999, "agent": agent, "room": room, "requester": visitor, "prompt": query, "query": query,
+                "runtime": next(a['runtime'] for a in CONFIG['agents'] if a['id']==agent)}
+
+    def test_greeting_keeps_identity_but_not_unrelated_quoted_commands(self):
+        stale = 'old-command-should-not-drive-greeting'
+        self.memory.ingest(self.page([
+            {'type':'profile','profile':{'handle':'eva','name':'Eva','bio':'I make kites','favorites':[]}},
+            self.message(1, stale)]))
+        original = {str(p):p.read_bytes() for p in self.root.glob('records/*/*.m8')}
+        job = self.job(query='Hey guys')
+        job['prompt'] = 'Earlier room history: '+stale+'\nCURRENT REQUEST: Hey guys'
+        prepared, receipt = self.memory.prepare(job)
+        self.assertNotIn(stale, prepared['prompt'])
+        self.assertIn('Hey guys', prepared['prompt'])
+        self.assertIn('I make kites', prepared['prompt'])
+        self.assertIn('You are Aye', prepared['prompt'])
+        self.assertNotIn('room:model-lab', {r['scope'] for r in receipt['records']})
+        self.assertEqual(original, {str(p):p.read_bytes() for p in self.root.glob('records/*/*.m8')})
+        refs = self.memory.search('visitor:eva','conversation',stale)
+        self.assertTrue(any(stale in self.memory.verified(ref)[0]['text'] for ref in refs))
 
     def test_native_process_restart_old_recall_and_index_rebuild(self):
         page = self.page([self.message(1, "My keepsake phrase is amber otter telescope."), self.message(2, "What is my name and what do I enjoy making? Answer in one sentence.")])
@@ -86,8 +105,16 @@ m.close()
         self.assertNotIn("jade parrot", prepared["prompt"])
         self.assertNotIn("agent:aye", prepared["prompt"])
         self.assertIn("violet narwhal", prepared["prompt"])  # Eva's own public history follows Eva.
+        self.assertEqual(prepared["participant"], {"name": "Eva", "bio": "I now make kites"})
+        self.memory.close()
+        self.memory = self.open()
+        restored, _ = self.memory.prepare(self.job("cheet", "eva", "tokyo-lab"))
+        self.assertEqual(restored["participant"], prepared["participant"])
         prepared, _ = self.memory.prepare(self.job("cheet", "nobody", "tokyo-lab"))
         self.assertNotIn("violet narwhal", prepared["prompt"])
+        self.assertNotIn("participant", prepared)
+        autonomous, _ = self.memory.prepare({**self.job("cheet", "", "hot-tub"), "autonomous": True})
+        self.assertNotIn("participant", autonomous)
         self.assertEqual({r["scope"] for r in receipt["records"]}, {"family", "agent:cheet", "visitor:eva"})
 
     def test_crash_after_native_write_replay_deduplicates_and_source_is_pinned(self):
