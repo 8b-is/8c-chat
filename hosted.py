@@ -379,13 +379,15 @@ def setup_workspace(agent, root, g8t):
             target = workspace / 'reference' / 'g8t' / path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(raw)
-        if Path('/usr/local/bin/st').exists():
+        st_file = workspace / 'reference' / 'g8t' / 'smart-tree.txt'
+        rev_file = workspace / 'reference' / 'g8t' / 'REVISION'
+        if Path('/usr/local/bin/st').exists() and (not st_file.exists() or not rev_file.exists() or not rev_file.read_text().startswith(revision)):
             try:
-                tree = command(['/usr/local/bin/st', '--mode', 'ai', '--depth', '3', str(source)], workspace, timeout=10)
-                (workspace / 'reference' / 'g8t' / 'smart-tree.txt').write_text(tree[:65_536])
+                tree = command(['/usr/local/bin/st', '--mode', 'ai', '--depth', '3', str(source / 'src')], workspace, timeout=5)
+                st_file.write_text(tree[:65_536])
             except (OSError, ValueError, subprocess.TimeoutExpired):
                 pass
-        (workspace / 'reference' / 'g8t' / 'REVISION').write_text(revision + '\nhttps://github.com/8b-is/g8t\n')
+        rev_file.write_text(revision + '\nhttps://github.com/8b-is/g8t\n')
     chat_source = Path('/data/.agent-workspaces/8c-chat-bb80c2d68133-agent-capabilities-20261101')
     if not chat_source.exists():
         chat_source = Path('/data/8b-is/8c-chat')
