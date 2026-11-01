@@ -35,6 +35,54 @@
   let tubRunning = true;
   let identityBusy = false;
   const sending = new Set();
+  const keyDownAt = new Map();
+  let dwellSum = 0n, dwellCount = 0n, flightSum = 0n, flightCount = 0n, jitterSum = 0n, lastUpAt = 0n, keystrokes = 0n, pasteEvents = 0n;
+  function nowMsBig() { return BigInt(Math.trunc(performance.now())); }
+  function recordKeyDown(event) {
+    if (event.repeat || !event.key || event.key.length !== 1) return;
+    const t = nowMsBig();
+    keyDownAt.set(event.code || event.key, t);
+    if (lastUpAt > 0n && t >= lastUpAt) {
+      const flight = t - lastUpAt;
+      if (flight <= 3000n) {
+        if (flightCount > 0n) {
+          const avg = flightSum / flightCount;
+          const diff = flight >= avg ? flight - avg : avg - flight;
+          jitterSum += diff;
+        }
+        flightSum += flight;
+        flightCount += 1n;
+      }
+    }
+    keystrokes += 1n;
+  }
+  function recordKeyUp(event) {
+    const code = event.code || event.key;
+    const down = keyDownAt.get(code);
+    const t = nowMsBig();
+    if (down !== undefined && t >= down) {
+      const dwell = t - down;
+      if (dwell <= 1500n) { dwellSum += dwell; dwellCount += 1n; }
+      keyDownAt.delete(code);
+    }
+    lastUpAt = t;
+  }
+  function snapshotTelemetry() {
+    return {
+      dwell_ms: Number(dwellCount > 0n ? dwellSum / dwellCount : 0n),
+      flight_ms: Number(flightCount > 0n ? flightSum / flightCount : 0n),
+      jitter_ms: Number(flightCount > 1n ? jitterSum / (flightCount - 1n) : 0n),
+      keystrokes: Number(keystrokes),
+      paste_events: Number(pasteEvents),
+      screen_w: Math.trunc(window.innerWidth || 0),
+      screen_h: Math.trunc(window.innerHeight || 0),
+      tz_offset_mins: Math.trunc(new Date().getTimezoneOffset() + 1440),
+    };
+  }
+  function resetTelemetry() {
+    keyDownAt.clear();
+    dwellSum = 0n; dwellCount = 0n; flightSum = 0n; flightCount = 0n; jitterSum = 0n; lastUpAt = 0n; keystrokes = 0n; pasteEvents = 0n;
+  }
 
   async function api(path, body, signal) {
     const own = signal ? null : new AbortController();
@@ -59,11 +107,15 @@
     el("msgInput").value = draft(room).text;
     el("sendBtn").disabled = sending.has(room);
     el("sendBtn").textContent = sending.has(room) ? "Sending…" : "Send";
-    el("sendStatus").textContent = draft(room).error || "";
+    el("sendStatus").textContent = draft(room).error || profile?.trust?.challenge_hint || "";
     el("msgInput").placeholder = profile ? "Talk or type. Either one counts." : "Introduce yourself, then talk or type.";
   }
   function identityLabels() {
     el("whoBtn").textContent = profile ? profile.name : "Introduce yourself";
+    const t = profile?.trust;
+    el("whoBtn").title = t?.high_trust ? "Verified founder session · detection " + t.detection_pq
+      : t?.verified ? "Verified family session · detection " + t.detection_pq
+      : t?.challenge_hint ? t.challenge_hint : "";
     el("favoriteBtn").setAttribute("aria-pressed", String(Boolean(profile?.favorites?.includes(room))));
     el("favoriteBtn").textContent = profile?.favorites?.includes(room) ? "★" : "☆";
     refreshComposer();
@@ -77,7 +129,9 @@
     el("identitySave").textContent = profile ? "Save introduction" : "Join the room";
     el("identityClose").textContent = profile ? "Close" : "Just read for now";
     el("switchPerson").hidden = !profile;
-    el("identityStatus").textContent = "";
+    el("identityStatus").textContent = profile?.trust?.high_trust ? "Verified founder (" + profile.trust.detection_pq + " cadence)"
+      : profile?.trust?.verified ? "Verified family member (" + profile.trust.detection_pq + " cadence)"
+      : profile?.trust?.challenge_hint || "";
     if (!el("whoSheet").open) el("whoSheet").showModal();
   }
   function paintRooms() {
@@ -625,7 +679,9 @@
     d.error = ""; saveDrafts(); sending.add(selected);
     if (selected === room) refreshComposer();
     try {
-      await api("/api/messages", {room: selected, text, client_id: id, agent: mode === "no" ? "auto" : mode, ask_aye: mode === "no" ? "no" : "always"});
+      const res = await api("/api/messages", {room: selected, text, client_id: id, agent: mode === "no" ? "auto" : mode, ask_aye: mode === "no" ? "no" : "always", telemetry: snapshotTelemetry()});
+      if (res.profile) { profile = res.profile; identityLabels(); }
+      resetTelemetry();
       const current = draft(selected);
       // A successful earlier send must never erase a newer draft typed while it was in flight.
       if (current.text.trim() === text && current.id === id) drafts[selected] = {text: "", id: "", error: ""};
@@ -648,8 +704,8 @@
     event.preventDefault(); if (identityBusy) return;
     identityBusy = true; el("identitySave").disabled = true; el("identityStatus").textContent = "";
     try {
-      const result = profile ? await api("/api/profile", {bio: el("bioInput").value, favorites: profile.favorites})
-        : await api("/api/introduce", {name: el("nameInput").value, bio: el("bioInput").value});
+      const result = profile ? await api("/api/profile", {bio: el("bioInput").value, favorites: profile.favorites, telemetry: snapshotTelemetry()})
+        : await api("/api/introduce", {name: el("nameInput").value, bio: el("bioInput").value, telemetry: snapshotTelemetry()});
       profile = result.profile;
       if (result.token) { token = result.token; store("8c_token_v8", token); }
       generation += 1; identityLabels(); el("whoSheet").close(); el("msgInput").focus(); poll();
@@ -691,7 +747,13 @@
     }
   });
   el("chatForm").addEventListener("submit", event => { event.preventDefault(); send(); });
-  el("msgInput").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); send(); } });
+  el("msgInput").addEventListener("keydown", event => { recordKeyDown(event); if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); send(); } });
+  el("msgInput").addEventListener("keyup", recordKeyUp);
+  el("msgInput").addEventListener("paste", () => { pasteEvents += 1n; });
+  el("nameInput").addEventListener("keydown", recordKeyDown);
+  el("nameInput").addEventListener("keyup", recordKeyUp);
+  el("bioInput").addEventListener("keydown", recordKeyDown);
+  el("bioInput").addEventListener("keyup", recordKeyUp);
   el("messages").addEventListener("scroll", () => {
     // DOM positions are an external rendering boundary; truncate to integer pixels before arithmetic.
     const box = el("messages"); follow = BigInt(box.scrollHeight) - BigInt(Math.trunc(box.scrollTop)) - BigInt(box.clientHeight) < 80n;

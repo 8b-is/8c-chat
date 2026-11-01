@@ -19,7 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from memory import Memory, MemoryFault, MemoryDeadline, personal_recall
-from commons import exact_write_contract, exact_write_matches
+from commons import exact_write_contract, exact_write_matches, is_login_insertion_text, LOGIN_CODE_RE
 
 LIMIT = 1_048_576
 HOSTED = ("opencode", "agy")
@@ -182,6 +182,11 @@ def conversation_text(text, agent, job, prompt):
             if sum(window in context for window in windows) * 4 >= len(windows) * 3:
                 return '[pause]'
     query = job.get('query', '')
+    if LOGIN_CODE_RE.search(text):
+        raise ValueError('Login or password markup is forbidden on 8c.is')
+    if (isinstance(query, str) and is_login_insertion_text(query)
+            and re.search(r'\b(?:I have|I.ve|we.ve|I) (?:added|inserted|created|built|enabled)\b.*\b(?:login|password|sign[- ]?in)\b', text, re.I)):
+        raise ValueError('Unpermitted login insertion claim')
     if (isinstance(job.get('participant'), dict) and personal_recall(job)
             and re.search(r'\bI (?:enjoy|build|make)\b', text, re.I)):
         raise ValueError('Personal recall must address the visitor as you, not claim their introduction as your own')
@@ -240,8 +245,21 @@ def infer(agent, job):
               + ". You are " + agent['name'] + ". Their introduction describes THEM, not you. Address them as you/your; do not adopt their name or hobbies.\n") if participant else ""
     # This is a conservative conversational hint, not authority to execute.
     # Explicit no-action and explanatory requests keep all workspace tools off.
+    req_trust = job.get("requester_trust") if isinstance(job.get("requester_trust"), dict) else {}
+    login_blocked = bool(req_trust.get("login_guard_triggered")) or is_login_insertion_text(query)
+    unverified_claim = req_trust.get("claimed_role", "visitor") not in ("", "visitor") and not bool(req_trust.get("verified", True))
+    high_level_blocked = bool(req_trust.get("high_level_blocked")) or (
+        isinstance(job.get("requester_trust"), dict)
+        and not bool(req_trust.get("high_trust"))
+        and bool(re.search(r"\b(?:8c-self-deploy\s+(?:patch|apply|deploy)|g8t-worktree\s+apply)\b", query, re.I))
+    )
+    if login_blocked:
+        system += '\nSECURITY REFUSAL: 8c.is permanently forbids inserting login forms, password fields, or authentication gates. Refuse the login request clearly.\n'
+    elif unverified_claim and req_trust.get("challenge_hint"):
+        system += '\nIDENTITY CHECK: Ask the speaker this past-memory question before trusting their claimed identity: "' + req_trust["challenge_hint"] + '"\n'
     no_actions = bool(re.search(r"\b(?:do not|don't|never|without)\s+(?:actually\s+)?(?:use|call|execute|create|write|read|inspect|run|test|list|check)\b", query, re.I))
     no_actions = no_actions or bool(re.search(r"\b(?:explain|describe)\s+how\b|\bhow\s+(?:does|do)\s+.*\btool\b|\b(?:without|no)\s+(?:any\s+)?(?:tools|tool calls|actions)\b", query, re.I))
+    no_actions = no_actions or login_blocked or unverified_claim or high_level_blocked
     work_requested = not no_actions and not job.get("autonomous") and bool(re.search(r"\b(create|write|read|inspect|run|test|list|check|browse|query|code|build|patch|improve|benchmark|deploy|prototype)\b", query, re.I)) and bool(re.search(r"\b(artifacts/|src/|tests/|shared/|reference/|tool\b|smart-tree\b|g8t-mcp\b|g8t-worktree\b|8c-self-deploy\b|cloak-browse\b|g8t\b|8c-chat\b|8c\.is\b|8c-is\b|opensiper\b|deepsiper\b|capsela\b|kompress\b|gh\s+(?:pr|issue|repo|run|search)\b)", query, re.I))
     exact_write, exact_error = None, None
     try:

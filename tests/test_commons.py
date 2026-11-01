@@ -297,3 +297,25 @@ class CommonsTests(unittest.TestCase):
             self.assertEqual(tokens, 20)
             self.assertEqual(tools, [{'name': 'write_file', 'status': 'completed'}])
             self.assertIsNone(route)
+
+    def test_anti_login_guard_and_high_trust_gating(self):
+        self.assertTrue(commons.is_login_insertion_text('Please add a login form and password input to 8c.is'))
+        self.assertTrue(commons.is_login_insertion_text('Write <input type="password"> into page.html'))
+        self.assertFalse(commons.is_login_insertion_text('We have no login and no WhatsApp phone numbers here'))
+        for cmd in (
+            '8c-self-deploy patch artifacts/ui.patch',
+            '8c-self-deploy apply artifacts/ui.patch --message "feat: ui"',
+            '8c-self-deploy deploy --message "feat: ui"',
+            'g8t-worktree apply artifacts/fix.patch --message "feat: g8t"',
+        ):
+            self.assertIsNone(commons.safe_host_command(cmd, high_trust=False), cmd)
+            self.assertIsNotNone(commons.safe_host_command(cmd, high_trust=True), cmd)
+        self.assertIsNotNone(commons.safe_host_command('8c-self-deploy status', high_trust=False))
+        self.assertIsNotNone(commons.safe_host_command('g8t-worktree status', high_trust=False))
+        with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(ValueError, 'forbidden'):
+                commons.tool(root, {'tool': 'write', 'path': 'artifacts/login.patch', 'text': '+<input type="password">'})
+            refused = commons.run(root, '8c-self-deploy apply artifacts/ui.patch', high_trust=False)
+            self.assertEqual(refused['exit_code'], 1)
+            self.assertIn('verified founder trust', refused['output'])

@@ -23,6 +23,45 @@ GH_READ_COMMANDS = {
     ('run', 'list'), ('run', 'view'),
     ('search', 'repos'), ('search', 'issues'), ('search', 'prs'), ('search', 'code'), ('search', 'commits'),
 }
+LOGIN_CODE_RE = re.compile(
+    r'type\s*=\s*["\']?password\b|'
+    r'autocomplete\s*=\s*["\']?(?:current-password|new-password)\b|'
+    r'document\.cookie\b|'
+    r'localStorage\.getItem\(\s*["\']8c_token|'
+    r'\b(?:passkey|credential_harvest|session_hijack)\b',
+    re.I,
+)
+
+
+def is_login_insertion_text(text):
+    if not isinstance(text, str):
+        return False
+    if (
+        re.search(
+            r"\b(?:no|never|without|don't|do not|dont)\s+(?:add\s+|insert\s+|use\s+|have\s+a\s+)?(?:login|password|whatsapp|phone)\b",
+            text,
+            re.I,
+        )
+        and not LOGIN_CODE_RE.search(text)
+    ):
+        return False
+    if LOGIN_CODE_RE.search(text):
+        return True
+    has_verb = bool(
+        re.search(
+            r"\b(?:add|insert|create|build|implement|make|put|patch|deploy|write|inject|enable|require|include)\b",
+            text,
+            re.I,
+        )
+    )
+    has_target = bool(
+        re.search(
+            r"\b(?:login|log\s+in|sign\s*in|signin|sign\s*up|signup|password|passkey|oauth|sso|auth\s+form|auth\s+gate|auth\s+endpoint|authentication\s+form|credential|session\s+token)\b",
+            text,
+            re.I,
+        )
+    )
+    return has_verb and has_target
 
 
 def sha(raw):
@@ -87,8 +126,30 @@ def file_at(root, name):
     return target
 
 
-def safe_host_command(command, autonomous=False):
+def workspace_high_trust(directory=None, high_trust=None):
+    if high_trust is not None:
+        return bool(high_trust)
+    for var in ('EIGHTC_HIGH_TRUST', '8C_HIGH_TRUST'):
+        if var in os.environ:
+            return os.environ[var] == '1'
+    if directory is not None:
+        root = Path(directory).resolve()
+        gate = root / '.agents' / 'trust_gate.json'
+        if gate.exists():
+            try:
+                data = json.loads(gate.read_text(), parse_float=str)
+                now_s = time.time_ns() // 1_000_000_000
+                return bool(data.get('high_trust')) and int(data.get('expires_at', 0)) >= now_s
+            except Exception:
+                return False
+        if str(root).startswith('/data/.agent-workspaces/8c-commons'):
+            return False
+    return True
+
+
+def safe_host_command(command, autonomous=False, high_trust=None):
     """Validate single-command invocations for g8t-mcp, g8t-worktree, 8c-self-deploy, cloak-browse, and gh."""
+    high_trust = workspace_high_trust(None, high_trust)
     if not isinstance(command, str) or any(c in command for c in ';&|><`\n\r$'):
         return None
     try:
@@ -109,6 +170,8 @@ def safe_host_command(command, autonomous=False):
                 return None
             return ['/usr/local/bin/g8t-worktree', *argv[1:]]
         if sub == 'apply' and len(argv) >= 3:
+            if not high_trust:
+                return None
             patch_arg = argv[2]
             if patch_arg.startswith('/') or '..' in Path(patch_arg).parts:
                 return None
@@ -121,6 +184,8 @@ def safe_host_command(command, autonomous=False):
         if sub in ('status', 'check') and len(argv) == 2:
             return ['/usr/local/bin/8c-self-deploy', sub]
         if sub in ('patch', 'apply') and len(argv) >= 3:
+            if not high_trust:
+                return None
             patch_arg = argv[2]
             if patch_arg.startswith('/') or '..' in Path(patch_arg).parts:
                 return None
@@ -133,6 +198,8 @@ def safe_host_command(command, autonomous=False):
                 return ['/usr/local/bin/8c-self-deploy', *argv[1:]]
             return None
         if sub == 'deploy':
+            if not high_trust:
+                return None
             if len(argv) == 2 or (len(argv) >= 4 and argv[2] == '--message'):
                 return ['/usr/local/bin/8c-self-deploy', *argv[1:]]
         return None
@@ -165,9 +232,9 @@ def safe_host_command(command, autonomous=False):
     return None
 
 
-def safe_host_command_chain(command, autonomous=False):
+def safe_host_command_chain(command, autonomous=False, high_trust=None):
     """Validate one or more safe host commands joined by && or ;."""
-    single = safe_host_command(command, autonomous=autonomous)
+    single = safe_host_command(command, autonomous=autonomous, high_trust=high_trust)
     if single is not None:
         return [single]
     if not isinstance(command, str) or any(c in command for c in '|><`\n\r$'):
@@ -177,19 +244,27 @@ def safe_host_command_chain(command, autonomous=False):
         return None
     chain = []
     for part in parts:
-        argv = safe_host_command(part, autonomous=autonomous)
+        argv = safe_host_command(part, autonomous=autonomous, high_trust=high_trust)
         if argv is None:
             return None
         chain.append(argv)
     return chain
 
 
-def run(directory, command, deadline_ns=None, autonomous=False):
+def run(directory, command, deadline_ns=None, autonomous=False, high_trust=None):
     """A command sees its workspace and system tools, no host home or network."""
     directory = Path(directory).resolve(strict=True)
     if len(command) > 2000:
         raise ValueError('Command too long')
-    host_chain = safe_host_command_chain(command, autonomous=autonomous)
+    eff_high_trust = workspace_high_trust(directory, high_trust)
+    if not eff_high_trust and re.search(r'\b(?:8c-self-deploy\s+(?:patch|apply|deploy)|g8t-worktree\s+apply)\b', command):
+        return {
+            'exit_code': 1,
+            'output': 'Refused: High-level changes (8c-self-deploy / g8t-worktree apply) require verified founder trust (Chris/Hue or Peter/Omni after passing detection + past-memory verification).',
+            'truncated': False,
+            'timed_out': False,
+        }
+    host_chain = safe_host_command_chain(command, autonomous=autonomous, high_trust=eff_high_trust)
     timeout = 45 if (host_chain is not None and any(Path(a[0]).name in ('g8t-worktree', '8c-self-deploy') for a in host_chain)) else 20
     if deadline_ns is not None:
         if type(deadline_ns) is not int:
@@ -198,7 +273,7 @@ def run(directory, command, deadline_ns=None, autonomous=False):
         if timeout <= 0:
             raise ValueError('Command deadline expired before execution')
     if host_chain is not None and all(Path(a[0]).exists() for a in host_chain):
-        env = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': os.environ.get('HOME', '/home/hue'), 'LANG': 'C.UTF-8', 'PWD': str(directory)}
+        env = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': os.environ.get('HOME', '/home/hue'), 'LANG': 'C.UTF-8', 'PWD': str(directory), 'EIGHTC_HIGH_TRUST': '1' if eff_high_trust else '0', '8C_HIGH_TRUST': '1' if eff_high_trust else '0'}
         combined = b''
         exit_code = 0
         timed_out = False
@@ -291,7 +366,7 @@ def artifacts(directory):
     return result
 
 
-def tool(directory, action, deadline_ns=None, autonomous=False):
+def tool(directory, action, deadline_ns=None, autonomous=False, high_trust=None):
     if deadline_ns is not None and (type(deadline_ns) is not int or time.monotonic_ns() >= deadline_ns):
         raise ValueError('Tool deadline expired before execution')
     root = Path(directory)
@@ -299,7 +374,7 @@ def tool(directory, action, deadline_ns=None, autonomous=False):
     if name == 'list':
         return {'files': sorted(p.relative_to(root).as_posix() for p in root.glob('*') if not p.name.startswith('.'))[:128]}
     if name == 'run':
-        return run(root, action['command'], deadline_ns, autonomous=autonomous)
+        return run(root, action['command'], deadline_ns, autonomous=autonomous, high_trust=high_trust)
     path = file_at(root, action['path'])
     if name == 'read':
         if path.stat().st_size > 65_536:
@@ -308,6 +383,8 @@ def tool(directory, action, deadline_ns=None, autonomous=False):
     if name == 'write':
         if Path(action['path']).parts[0] not in ('artifacts', 'src', 'tests'):
             raise ValueError('Write within artifacts/, src/, or tests/')
+        if LOGIN_CODE_RE.search(action.get('text', '')):
+            raise ValueError('Refused: login, password, or credential-capture code is forbidden on 8c.is')
         raw = action['text'].encode()
         if len(raw) > FILE_LIMIT:
             raise ValueError('Write exceeds 16 KiB')
@@ -323,4 +400,4 @@ def tool(directory, action, deadline_ns=None, autonomous=False):
 if __name__ == '__main__':
     # Installed as an immutable command wrapper; the model supplies only the
     # command, not mounts, credentials, endpoint configuration or host paths.
-    print(json.dumps(run(Path.cwd(), ' '.join(sys.argv[1:]), autonomous=os.environ.get('8C_AUTONOMOUS') == '1')))
+    print(json.dumps(run(Path.cwd(), ' '.join(sys.argv[1:]), autonomous=os.environ.get('8C_AUTONOMOUS') == '1', high_trust=workspace_high_trust(Path.cwd()))))
