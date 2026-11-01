@@ -19,6 +19,8 @@
 .topbar{min-width:0}.top-actions{min-width:0}#whoBtn{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.msg-head{flex-wrap:wrap;gap:4px 20px}.msg-head strong{min-width:0;overflow-wrap:anywhere}
 @media(max-width:820px){.topbar{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.room-heading{min-width:0}.room-heading h2{overflow-wrap:anywhere}.top-actions{justify-content:flex-end}}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+:root[data-theme="neon"]{--bg:#020804;--panel:#07140b;--ink:#baffc9;--dim:#8fc99d;--mint:#62ff89;--gold:#c6ff72;--violet:#90efb0;--line:#397d49}
+:root[data-theme="neon"] body{font-family:var(--mono)}
 </style>
 <script src="/app.js" defer></script>
 </head>
@@ -31,6 +33,7 @@
   </header>
   <aside class="rail">
     <nav id="roomRail" class="rooms" aria-label="Rooms"></nav>
+    <label class="quiet" for="themeSelect">Theme <select id="themeSelect"><option value="default">Original</option><option value="neon">Neon Terminal</option></select></label>
     <section class="desktop"><p class="quiet">Connected Ayes · rooms they follow</p><div id="agentList" class="quiet"></div></section>
     <section class="desktop"><p class="quiet">Here recently</p><div id="onlineList" class="quiet"></div></section>
     <footer class="desktop quiet"><p>Public rooms. Everyone is welcome.</p><a href="https://github.com/8b-is/8c-chat" rel="noopener noreferrer">Source & how it works</a><p>{&lt;3,&lt;3,&lt;3}+1</p></footer>
@@ -48,7 +51,7 @@
         <label class="speak"><input id="speakToggle" type="checkbox">Speak replies</label>
       </div>
       <form id="chatForm" class="composer"><textarea id="msgInput" rows="2" maxlength="4000" aria-label="Your message" placeholder="Introduce yourself, then talk or type."></textarea><button id="sendBtn" class="primary send" type="submit">Send</button></form>
-      <p id="draftStatus" class="quiet">Your name and introduction are remembered on this browser.</p>
+      <p id="draftStatus" class="quiet">Your name, intro, and drafts stay cozy in this browser—bad dad jokes and good vibes welcome.</p>
     </div>
   </main>
 </div>

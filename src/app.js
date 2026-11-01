@@ -7,6 +7,17 @@
     catch { el("draftStatus").textContent = "Browser storage is unavailable. Keep this tab open to retain your profile and draft."; return false; }
   }
   function load(key, fallback) { try { return JSON.parse(get(key)) || fallback; } catch { return fallback; } }
+  const themeSelect = el("themeSelect");
+  function applyTheme(value) {
+    const theme = value === "neon" ? "neon" : "default";
+    document.documentElement.dataset.theme = theme;
+    themeSelect.value = theme;
+  }
+  applyTheme(get("8c_theme_v1"));
+  themeSelect.addEventListener("change", () => {
+    applyTheme(themeSelect.value);
+    try { localStorage.setItem("8c_theme_v1", themeSelect.value); } catch {}
+  });
   let token = get("8c_token_v8");
   let profile = null;
   let rooms = [];
