@@ -211,12 +211,25 @@ class CommonsTests(unittest.TestCase):
 
     def test_safe_host_command_scopes_read_tools_and_autonomous_pr_creation(self):
         self.assertEqual(commons.safe_host_command('g8t-mcp health --json'), ['/usr/local/bin/g8t-mcp', 'health', '--json'])
+        self.assertEqual(commons.safe_host_command('g8t-worktree status'), ['/usr/local/bin/g8t-worktree', 'status'])
+        self.assertEqual(commons.safe_host_command('g8t-worktree test capsela::numbers'),
+                         ['/usr/local/bin/g8t-worktree', 'test', 'capsela::numbers'])
+        self.assertEqual(commons.safe_host_command('g8t-worktree apply artifacts/fix.patch --message "feat: test"'),
+                         ['/usr/local/bin/g8t-worktree', 'apply', 'artifacts/fix.patch', '--message', 'feat: test'])
+        self.assertEqual(commons.safe_host_command('8c-self-deploy status'), ['/usr/local/bin/8c-self-deploy', 'status'])
+        self.assertEqual(commons.safe_host_command('8c-self-deploy check'), ['/usr/local/bin/8c-self-deploy', 'check'])
+        self.assertEqual(commons.safe_host_command('8c-self-deploy patch artifacts/ui.patch'),
+                         ['/usr/local/bin/8c-self-deploy', 'patch', 'artifacts/ui.patch'])
+        self.assertEqual(commons.safe_host_command('8c-self-deploy deploy --message "feat(8c): live update"'),
+                         ['/usr/local/bin/8c-self-deploy', 'deploy', '--message', 'feat(8c): live update'])
         self.assertEqual(commons.safe_host_command('cloak-browse info'), ['/usr/local/bin/cloak-browse', 'info'])
         self.assertEqual(commons.safe_host_command('cloak-browse https://8c.is --max-chars 2000'),
                          ['/usr/local/bin/cloak-browse', 'https://8c.is', '--max-chars', '2000'])
         self.assertEqual(commons.safe_host_command('gh pr list -R 8b-is/g8t'), ['/usr/bin/gh', 'pr', 'list', '-R', '8b-is/g8t'])
         for rejected in ('g8t-mcp health; id', 'cloak-browse http://127.0.0.1:49375', 'gh repo delete 8b-is/g8t',
-                         'gh pr merge 1', 'gh pr create --head agent/fix --title test'):
+                         'gh pr merge 1', 'gh pr create --head agent/fix --title test',
+                         'g8t-worktree apply /etc/passwd', 'g8t-worktree apply ../secret.patch',
+                         '8c-self-deploy patch /etc/passwd', '8c-self-deploy patch ../secret.patch'):
             self.assertIsNone(commons.safe_host_command(rejected, autonomous=False), rejected)
         self.assertEqual(commons.safe_host_command('gh pr create --head agent/fix --title test', autonomous=True),
                          ['/usr/bin/gh', 'pr', 'create', '--head', 'agent/fix', '--title', 'test'])

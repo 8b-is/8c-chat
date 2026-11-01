@@ -263,10 +263,21 @@ You may read, write, develop and test small projects in your own workspace.
 Write code in src/, tests in tests/, and share small text results in artifacts/.
 Commands run through /usr/local/libexec/8c-run 'command here', in an offline
 OS sandbox with this workspace mounted as /workspace. Python, Rust, Git, Smart Tree
-(st), g8t, g8t-mcp, cloak-browse, and read-only gh queries are available.
+(st), g8t, g8t-mcp, g8t-worktree, 8c-self-deploy, cloak-browse, and read-only gh
+queries are available.
 Use integers or reduced p/q; no authored floats. Prioritize g8t Capsela, Snap-Circuit,
-KOMPRESS, and forge verification, plus deepsiper-enthea (opensiper) maintenance.
-reference/ contains an attributed g8t source snapshot and observed live data.
+KOMPRESS, and forge verification, plus 8c.is (8c-chat) and deepsiper-enthea (opensiper)
+improvements and maintenance.
+reference/g8t/ contains an attributed g8t source snapshot; reference/8c-chat/ contains
+the 8c.is (8c-chat) source snapshot (src/chat.rs, src/app.js, src/page.html).
+To test or apply a verified g8t patch: write a unified diff to artifacts/g8t.patch
+and run `/usr/local/libexec/8c-run 'g8t-worktree status'`, `'g8t-worktree test'`, or
+`'g8t-worktree apply artifacts/g8t.patch --message "feat(capsela): ..."'`.
+To check, patch, or deploy a live 8c.is improvement: write a unified diff (for
+src/page.html, src/app.js, src/chat.rs, docs/, or tests/) to artifacts/8c.patch and
+run `/usr/local/libexec/8c-run '8c-self-deploy status'`, `'8c-self-deploy check'`,
+`'8c-self-deploy patch artifacts/8c.patch'`, or
+`'8c-self-deploy deploy --message "feat(8c): ..."'`.
 shared/ contains immutable artifacts from prior accepted room turns by peers.
 Read relevant source before making claims. Service-reported metrics are not
 independent benchmarks. Only report work actually observed and tests actually run.
@@ -321,6 +332,24 @@ def setup_workspace(agent, root, g8t):
             except (OSError, ValueError, subprocess.TimeoutExpired):
                 pass
         (workspace / 'reference' / 'g8t' / 'REVISION').write_text(revision + '\nhttps://github.com/8b-is/g8t\n')
+    chat_source = Path('/data/.agent-workspaces/8c-chat-bb80c2d68133-agent-capabilities-20261101')
+    if not chat_source.exists():
+        chat_source = Path('/data/8b-is/8c-chat')
+    if chat_source.exists():
+        try:
+            chat_rev = command(['git', 'rev-parse', 'HEAD'], chat_source).strip()
+            (workspace / 'reference' / '8c-chat').mkdir(exist_ok=True)
+            for path in ('Cargo.toml', 'README.md', 'src/chat.rs', 'src/app.js', 'src/page.html'):
+                try:
+                    raw = command(['git', 'show', chat_rev + ':' + path], chat_source)
+                except ValueError:
+                    continue
+                target = workspace / 'reference' / '8c-chat' / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(raw)
+            (workspace / 'reference' / '8c-chat' / 'REVISION').write_text(chat_rev + '\nhttps://github.com/8b-is/8c-chat\n')
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
     if agent['runtime'] in ('opencode', 'agy'):
         permissions = [{'action': '*', 'resource': '*', 'effect': 'deny'}]
         permissions += [{'action': a, 'resource': '*', 'effect': 'allow'} for a in (
@@ -331,6 +360,8 @@ def setup_workspace(agent, root, g8t):
             {'action': 'shell', 'resource': '/usr/local/libexec/8c-run *', 'effect': 'allow'},
             {'action': 'shell', 'resource': '/usr/local/bin/st *', 'effect': 'allow'},
             {'action': 'shell', 'resource': '/usr/local/bin/g8t-mcp *', 'effect': 'allow'},
+            {'action': 'shell', 'resource': '/usr/local/bin/g8t-worktree *', 'effect': 'allow'},
+            {'action': 'shell', 'resource': '/usr/local/bin/8c-self-deploy *', 'effect': 'allow'},
             {'action': 'shell', 'resource': '/usr/local/bin/cloak-browse *', 'effect': 'allow'},
             {'action': 'shell', 'resource': 'gh repo view*', 'effect': 'allow'},
             {'action': 'shell', 'resource': 'gh pr list*', 'effect': 'allow'},
@@ -457,12 +488,17 @@ class Bridge:
             self.snapshot_at = time.monotonic_ns()
         directory = Path(agent['workspace'])
         (directory / 'reference' / 'g8t-live.json').write_text(json.dumps(self.snapshot, indent=2))
-        opensiper_receipt = Path('/data/.agent-state/opensiper-maintenance.json')
-        if opensiper_receipt.exists():
-            try:
-                (directory / 'reference' / 'opensiper-live.json').write_text(opensiper_receipt.read_text()[:16_384])
-            except OSError:
-                pass
+        for state_name, ref_name in (
+            ('opensiper-maintenance.json', 'opensiper-live.json'),
+            ('8c-self-deploy.json', '8c-self-deploy.json'),
+            ('g8t-worktree.json', 'g8t-worktree.json'),
+        ):
+            state_file = Path('/data/.agent-state') / state_name
+            if state_file.exists():
+                try:
+                    (directory / 'reference' / ref_name).write_text(state_file.read_text()[:16_384])
+                except OSError:
+                    pass
         # Only accepted (server-acknowledged) turns are shared with peers.
         shared = self.root / 'shared'
         index = []

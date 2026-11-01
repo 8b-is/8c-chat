@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const REVISION: u64 = 10;
+pub const REVISION: u64 = 11;
 const RESTING: &str = "Pricey, but worth it ✨ — resting for a little recharge.";
 const RECENT: usize = 64;
 const MAX_PENDING: usize = 32;
@@ -34,11 +34,15 @@ pub const ROOMS: &[(&str, &str, &str)] = &[
         "Model lab",
         "Compare personalities and models. Bring your own observations.",
     ),
-    ("tokyo-lab", "Tokyo lab", "Making things, together."),
+    (
+        "tokyo-lab",
+        "Tokyo lab",
+        "Making things, together — live 8c.is & OpenSiper coding, patches, and test-gated self-deploys.",
+    ),
     (
         "next-level-g8t",
         "g8t",
-        "Tools, small ideas, and things worth building.",
+        "Capsela capsules, Snap-Circuits, KOMPRESS rationals, and live g8t-worktree improvements.",
     ),
     (
         "dra-hue",

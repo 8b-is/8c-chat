@@ -88,7 +88,7 @@ def file_at(root, name):
 
 
 def safe_host_command(command, autonomous=False):
-    """Validate single-command invocations for g8t-mcp, cloak-browse, and gh."""
+    """Validate single-command invocations for g8t-mcp, g8t-worktree, 8c-self-deploy, cloak-browse, and gh."""
     if not isinstance(command, str) or any(c in command for c in ';&|><`\n\r$'):
         return None
     try:
@@ -100,6 +100,35 @@ def safe_host_command(command, autonomous=False):
     base = Path(argv[0]).name
     if base == 'g8t-mcp' and len(argv) >= 2 and argv[1] in G8T_MCP_COMMANDS:
         return ['/usr/local/bin/g8t-mcp', *argv[1:]]
+    if base == 'g8t-worktree' and len(argv) >= 2:
+        sub = argv[1]
+        if sub == 'status' and len(argv) == 2:
+            return ['/usr/local/bin/g8t-worktree', 'status']
+        if sub == 'test' and len(argv) in (2, 3):
+            if len(argv) == 3 and not re.fullmatch(r'[A-Za-z0-9_:]+', argv[2]):
+                return None
+            return ['/usr/local/bin/g8t-worktree', *argv[1:]]
+        if sub == 'apply' and len(argv) >= 3:
+            patch_arg = argv[2]
+            if patch_arg.startswith('/') or '..' in Path(patch_arg).parts:
+                return None
+            if len(argv) > 3 and argv[3] != '--message':
+                return None
+            return ['/usr/local/bin/g8t-worktree', *argv[1:]]
+        return None
+    if base == '8c-self-deploy' and len(argv) >= 2:
+        sub = argv[1]
+        if sub in ('status', 'check') and len(argv) == 2:
+            return ['/usr/local/bin/8c-self-deploy', sub]
+        if sub == 'patch' and len(argv) == 3:
+            patch_arg = argv[2]
+            if patch_arg.startswith('/') or '..' in Path(patch_arg).parts:
+                return None
+            return ['/usr/local/bin/8c-self-deploy', 'patch', patch_arg]
+        if sub == 'deploy':
+            if len(argv) == 2 or (len(argv) >= 4 and argv[2] == '--message'):
+                return ['/usr/local/bin/8c-self-deploy', *argv[1:]]
+        return None
     if base == 'cloak-browse' and len(argv) >= 2:
         if argv[1] == 'info' and len(argv) == 2:
             return ['/usr/local/bin/cloak-browse', 'info']
@@ -131,19 +160,19 @@ def safe_host_command(command, autonomous=False):
 
 def run(directory, command, deadline_ns=None, autonomous=False):
     """A command sees its workspace and system tools, no host home or network."""
-    timeout = 20
+    directory = Path(directory).resolve(strict=True)
+    if len(command) > 2000:
+        raise ValueError('Command too long')
+    host_argv = safe_host_command(command, autonomous=autonomous)
+    timeout = 45 if (host_argv is not None and Path(host_argv[0]).name in ('g8t-worktree', '8c-self-deploy')) else 20
     if deadline_ns is not None:
         if type(deadline_ns) is not int:
             raise ValueError('Invalid command deadline')
         timeout = min(timeout, (deadline_ns - time.monotonic_ns()) // 1_000_000_000)
         if timeout <= 0:
             raise ValueError('Command deadline expired before execution')
-    directory = Path(directory).resolve(strict=True)
-    if len(command) > 2000:
-        raise ValueError('Command too long')
-    host_argv = safe_host_command(command, autonomous=autonomous)
     if host_argv is not None and Path(host_argv[0]).exists():
-        env = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': os.environ.get('HOME', '/home/hue'), 'LANG': 'C.UTF-8'}
+        env = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': os.environ.get('HOME', '/home/hue'), 'LANG': 'C.UTF-8', 'PWD': str(directory)}
         with tempfile.TemporaryFile(dir='/tmp/opencode') as output:
             process = subprocess.Popen(host_argv, cwd=str(directory), env=env, stdin=subprocess.DEVNULL,
                                        stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
