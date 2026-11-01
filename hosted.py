@@ -228,10 +228,10 @@ def agy(agent, prompt):
         'read_url(8c.is)',
         'read_url(github.com)',
     ]
+    ws = str(Path(agent['workspace']).resolve())
+    deny = ['execute_url(*)'] + [f'write_file({ws}/{p})' for p in ('.git/', '.agents/', '.opencode/', 'AGENTS.md', 'reference/', 'shared/')]
     settings = {'toolPermission': 'request-review', 'allowNonWorkspaceAccess': False,
-                'permissions': {'allow': allow,
-                                'deny': ['execute_url(*)', 'write_file(.git/)', 'write_file(.agents/)',
-                                         'write_file(.opencode/)', 'write_file(AGENTS.md)', 'write_file(reference/)', 'write_file(shared/)']}}
+                'permissions': {'allow': allow, 'deny': deny}}
     args = [agent['binary'], '--model', agent['model'], '--sandbox', '--mode', 'accept-edits',
             '--settings', json.dumps(settings), '--disable-slash-commands', '--output-format', 'stream-json',
             '--input-format', 'stream-json', '--print-timeout', str(timeout-5)+'s']
@@ -246,11 +246,17 @@ def agy(agent, prompt):
             raise BudgetPause(RESTING)
         raise ValueError('agy did not finish')
     tools = []
+    last_text = ''
     for event in events:
         step = event.get('step_update', {})
         if step.get('step_type') == 'tool' and step.get('state') == 'DONE':
             tools.append({'name': step['tool_name'], 'status': 'error' if step.get('tool_info', {}).get('error') else 'completed'})
-    return result['response'], result['conversation_id'], result['usage']['output_tokens'], tools, None
+        if isinstance(step.get('text'), str) and step['text'].strip():
+            last_text = step['text'].strip()
+    response_text = (result.get('response') or '').strip() or last_text
+    if not response_text and tools:
+        response_text = f"Completed {len(tools)} workbench steps in {agent['name']} workspace."
+    return response_text[:3950], result['conversation_id'], result['usage']['output_tokens'], tools, None
 
 
 INSTRUCTIONS = """# 8c commons workbench
