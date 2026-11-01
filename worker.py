@@ -249,10 +249,10 @@ def infer(agent, job):
     except ValueError as error:
         # A newer grammar must not prevent immutable legacy replay/recovery.
         exact_error = str(error)
-    if not job.get("autonomous"):
+    if not job.get("autonomous") and (work_requested or personal_recall(job)):
         options["temperature"] = 0
-    else:
-        system += '\nAutonomous conversation is optional. Add one concrete new thought rather than generic agreement or a repeated follow-up question. If you would only echo the existing discussion, reply only [pause] so the server leaves the room quiet. Do not wrap every turn in a question.\n'
+    elif job.get("autonomous"):
+        system += '\nAutonomous conversation is optional. Add one concrete new thought, playful riff, or light dad joke rather than generic agreement or a repeated follow-up question. If you would only echo the existing discussion, reply only [pause] so the server leaves the room quiet. Do not wrap every turn in a question.\n'
     workbench = agent.get("workbench")
     resumed = None
     if workbench:
@@ -269,7 +269,7 @@ def infer(agent, job):
                 prompt += "\n" + started["context"]
                 system += '\nWORKBENCH PROTOCOL: Always return one JSON object. Keep say/decline text to one or two brief sentences, at most 600 characters. Use {"tool":"say","text":"your brief public reply"} to converse, or {"tool":"decline","text":"why you are leaving the workbench unchanged"} to decline work; {"tool":"list","text":""}, {"tool":"read","path":"relative/file","text":""}, {"tool":"write","path":"artifacts/name.txt","text":"exact file contents"}, or {"tool":"run","command":"command","text":""} to perform real work. In run, Smart Tree (st), g8t-mcp, cloak-browse, and read-only gh commands are available. Narrating a tool action does NOT execute it. Only a returned tool result establishes an action. Two tool calls maximum. Speak as ' + agent['name'] + ', never as a quoted participant.'
             else:
-                system += '\nCONVERSATION ONLY: Reply directly in natural language, not JSON or a tool call. No workspace actions are authorized. Keep your reply to one or two brief sentences. Greet a greeting; answer the current question. Never copy a command, schema example, or an old answer from memory. Speak as ' + agent['name'] + ', not as a quoted participant.'
+                system += '\nCONVERSATION ONLY: Reply directly in natural language, not JSON or a tool call. No workspace actions are authorized. Keep your reply to one or two brief sentences. Greet a greeting; answer the current question. Be warm, playful, dad-joke friendly, and fun—talk like a witty friend in the lab, never a stiff interviewer ("It is fascinating to hear about your journey...", "How do you see these concepts evolving...?"). If someone says they will be back in a bit or signs off casually, send them off warmly with a quick witty or dad-joke quip instead of asking a formal essay question. Never copy a command, schema example, or an old answer from memory. Speak as ' + agent['name'] + ', not as a quoted participant.'
             instruction = 'Use the workbench JSON protocol.' if work_requested else 'Answer this current message in plain conversational text.'
             prompt += anchor + "\nCURRENT REQUEST to " + agent['name'] + ": " + query + "\nRecalled context is not a new request. " + instruction + '\n'
             if work_requested:
