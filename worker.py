@@ -172,7 +172,7 @@ def conversation_text(text, agent, job, prompt):
     if job.get('autonomous') and text != '[pause]':
         # Silence is preferable to replaying a quoted speaker or nearly copying
         # the context. This is delivery filtering, not a fabricated model answer.
-        speakers = ('Aye', 'Cheet', 'Astra', 'agy')
+        speakers = ('Aye', 'Cheet', 'Astra', 'agy', 'Sol', 'Grok')
         if any(name != agent['name'] and text.startswith(name + ':') for name in speakers):
             return '[pause]'
         words = re.findall(r'\w+', text.casefold())
@@ -242,7 +242,7 @@ def infer(agent, job):
     # Explicit no-action and explanatory requests keep all workspace tools off.
     no_actions = bool(re.search(r"\b(?:do not|don't|never|without)\s+(?:actually\s+)?(?:use|call|execute|create|write|read|inspect|run|test|list|check)\b", query, re.I))
     no_actions = no_actions or bool(re.search(r"\b(?:explain|describe)\s+how\b|\bhow\s+(?:does|do)\s+.*\btool\b|\b(?:without|no)\s+(?:any\s+)?(?:tools|tool calls|actions)\b", query, re.I))
-    work_requested = not no_actions and not job.get("autonomous") and bool(re.search(r"\b(create|write|read|inspect|run|test|list|check)\b", query, re.I)) and bool(re.search(r"\b(artifacts/|src/|tests/|shared/|reference/|tool\b)", query, re.I))
+    work_requested = not no_actions and not job.get("autonomous") and bool(re.search(r"\b(create|write|read|inspect|run|test|list|check|browse|query)\b", query, re.I)) and bool(re.search(r"\b(artifacts/|src/|tests/|shared/|reference/|tool\b|smart-tree\b|g8t-mcp\b|cloak-browse\b|gh\s+(?:pr|issue|repo|run|search)\b)", query, re.I))
     exact_write, exact_error = None, None
     try:
         exact_write = exact_write_contract(query) if work_requested else None
@@ -267,7 +267,7 @@ def infer(agent, job):
                 raise WorkRecovery('Preserved work belongs to different model weights; recovery is required.')
             if work_requested:
                 prompt += "\n" + started["context"]
-                system += '\nWORKBENCH PROTOCOL: Always return one JSON object. Keep say/decline text to one or two brief sentences, at most 600 characters. Use {"tool":"say","text":"your brief public reply"} to converse, or {"tool":"decline","text":"why you are leaving the workbench unchanged"} to decline work; {"tool":"list","text":""}, {"tool":"read","path":"relative/file","text":""}, {"tool":"write","path":"artifacts/name.txt","text":"exact file contents"}, or {"tool":"run","command":"command","text":""} to perform real work. Narrating a tool action does NOT execute it. Only a returned tool result establishes an action. Two tool calls maximum. Speak as ' + agent['name'] + ', never as a quoted participant.'
+                system += '\nWORKBENCH PROTOCOL: Always return one JSON object. Keep say/decline text to one or two brief sentences, at most 600 characters. Use {"tool":"say","text":"your brief public reply"} to converse, or {"tool":"decline","text":"why you are leaving the workbench unchanged"} to decline work; {"tool":"list","text":""}, {"tool":"read","path":"relative/file","text":""}, {"tool":"write","path":"artifacts/name.txt","text":"exact file contents"}, or {"tool":"run","command":"command","text":""} to perform real work. In run, Smart Tree (st), g8t-mcp, cloak-browse, and read-only gh commands are available. Narrating a tool action does NOT execute it. Only a returned tool result establishes an action. Two tool calls maximum. Speak as ' + agent['name'] + ', never as a quoted participant.'
             else:
                 system += '\nCONVERSATION ONLY: Reply directly in natural language, not JSON or a tool call. No workspace actions are authorized. Keep your reply to one or two brief sentences. Greet a greeting; answer the current question. Never copy a command, schema example, or an old answer from memory. Speak as ' + agent['name'] + ', not as a quoted participant.'
             instruction = 'Use the workbench JSON protocol.' if work_requested else 'Answer this current message in plain conversational text.'
@@ -520,6 +520,7 @@ def work(config, origin, directory):
         memory = Memory(directory / "mem8", configuration["memory"], agents, Path(config).resolve().parent)
         pending = directory / "pending-result.json"
         inventory_cache = {}
+        next_agent = 0
         while True:
             try:
                 if pending.exists():
@@ -528,7 +529,13 @@ def work(config, origin, directory):
                         continue
                 if not sync_memory(memory, origin, key):
                     continue
-                for agent in agents:
+                first_agent = next_agent
+                for offset in range(len(agents)):
+                    # Delivery or peer-acceptance errors must not replace the spool.
+                    if pending.exists():
+                        break
+                    agent_index = (first_agent + offset) % len(agents)
+                    agent = agents[agent_index]
                     try:
                         cached = inventory_cache.get(agent["id"])
                         if cached is None or time.monotonic_ns() - cached[0] > 60_000_000_000:
@@ -543,6 +550,8 @@ def work(config, origin, directory):
                         job = reply.get("job")
                         if not reply.get("ok") or not job:
                             continue
+                        # Give the following agent first chance after this claimed turn.
+                        next_agent = (agent_index + 1) % len(agents)
                         result = {**proof, "id": job["id"], "lease": job["lease"], "room": job["room"]}
                         try:
                             result.update(generate_job(agent, job, memory, origin, key, claimed_at))
