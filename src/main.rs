@@ -1,63 +1,104 @@
 #![forbid(unsafe_code)]
 
-use eightc_chat::{
-    complete_aye, dispatch, hottub_turn, read_request, write_http, Ask, State, TUB_PAUSE_SECS,
-};
-use std::io::Write;
+use eightc_chat::{chat::Chat, dispatch, json_response, obj, read_request, write_http};
+use std::io::{self, Read, Write};
 use std::net::TcpListener;
-use std::sync::{Arc, Mutex};
+use std::path::Path;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-fn main() {
-    let addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8798".to_string());
-    let path = std::env::var("STATE_PATH").unwrap_or_else(|_| "/var/lib/8c-chat/rooms.m8".to_string());
-    let state = Arc::new(Mutex::new(State::load(&path)));
-    let listener = TcpListener::bind(&addr).unwrap_or_else(|err| {
-        eprintln!("8c-chat could not bind {addr}: {err}");
-        std::process::exit(1);
-    });
-    eprintln!("8c-chat listening on {addr}");
-    let tub_state = Arc::clone(&state);
-    let tub_on = std::env::var("HOTTUB").ok().as_deref() != Some("0");
-    thread::spawn(move || {
-        thread::sleep(Duration::from_secs(8));
-        loop {
-            if let Some(job) = hottub_turn(&tub_state, tub_on) {
-                complete_aye(&tub_state, job);
+struct DeadlineReader<'a> {
+    stream: &'a mut std::net::TcpStream,
+    deadline: Instant,
+}
+impl Read for DeadlineReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let remaining = self
+            .deadline
+            .checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "request deadline"))?;
+        self.stream.set_read_timeout(Some(remaining))?;
+        self.stream.read(buffer)
+    }
+}
+
+fn run() -> Result<(), String> {
+    let addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8798".into());
+    let path =
+        std::env::var("JOURNAL_PATH").unwrap_or_else(|_| "/var/lib/8c-chat/chat-v1.jsonl".into());
+    let config = match std::env::var("AGENTS_CONFIG") {
+        Ok(path) => std::fs::read_to_string(path).map_err(|e| e.to_string())?,
+        Err(_) => include_str!("../agents.example.json").to_string(),
+    };
+    let key = std::env::var("WORKER_KEY").unwrap_or_default();
+    let legacy = std::env::var("LEGACY_PATH").ok();
+    let state = Arc::new(Mutex::new(Chat::open(
+        Path::new(&path),
+        &config,
+        key,
+        legacy.as_deref().map(Path::new),
+    )?));
+    let listener = TcpListener::bind(&addr).map_err(|e| e.to_string())?;
+    let ticking = Arc::clone(&state);
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(3));
+        if let Ok(mut chat) = ticking.lock() {
+            if let Err(error) = chat.tick() {
+                eprintln!("scheduler: {error}");
             }
-            thread::sleep(Duration::from_secs(TUB_PAUSE_SECS));
         }
     });
-    for conn in listener.incoming() {
-        let Ok(stream) = conn else {
-            continue;
-        };
+    let (tx, rx) = mpsc::sync_channel::<std::net::TcpStream>(32);
+    let rx = Arc::new(Mutex::new(rx));
+    for _ in 0..16 {
         let state = Arc::clone(&state);
-        thread::spawn(move || {
+        let rx = Arc::clone(&rx);
+        thread::spawn(move || loop {
+            let stream = rx.lock().expect("receiver lock").recv();
+            let Ok(mut stream) = stream else {
+                break;
+            };
             let _ = stream.set_read_timeout(Some(Duration::from_secs(8)));
             let _ = stream.set_write_timeout(Some(Duration::from_secs(8)));
-            let mut stream = stream;
-            let Ok(incoming) = read_request(&mut stream) else {
-                let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
-                return;
+            let (method, response) = match read_request(DeadlineReader {
+                stream: &mut stream,
+                deadline: Instant::now() + Duration::from_secs(8),
+            }) {
+                Ok(req) => (req.method.clone(), dispatch(&state, &req)),
+                Err(_) => (
+                    "GET".into(),
+                    json_response(
+                        400,
+                        obj! {"ok" => false, "error" => "Invalid or incomplete HTTP request"},
+                    ),
+                ),
             };
-            let outcome = dispatch(
-                &state,
-                &Ask {
-                    method: &incoming.method,
-                    path: &incoming.path,
-                    query: &incoming.query,
-                    body: &incoming.body,
-                    host: &incoming.host,
-                },
-            );
-            if let Some(job) = outcome.aye {
-                let aye_state = Arc::clone(&state);
-                thread::spawn(move || complete_aye(&aye_state, job));
-            }
-            let bytes = write_http(&incoming.method, &outcome.response);
-            let _ = stream.write_all(&bytes);
+            let _ = stream.write_all(&write_http(&method, &response));
         });
+    }
+    eprintln!(
+        "8c-chat revision {} listening on {addr}",
+        eightc_chat::chat::REVISION
+    );
+    for stream in listener.incoming().flatten() {
+        if let Err(mpsc::TrySendError::Full(mut stream)) = tx.try_send(stream) {
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+            let _ = stream.write_all(&write_http(
+                "GET",
+                &json_response(
+                    503,
+                    obj! {"ok" => false, "error" => "Room busy; please retry. Your draft is safe."},
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("8c-chat: {error}");
+        std::process::exit(1);
     }
 }

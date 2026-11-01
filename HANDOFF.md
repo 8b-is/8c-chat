@@ -1,4 +1,13 @@
-# 8c.is room · 2026-11-01
+# Current handoff
+
+Revision 9 adds deployed native MEM|8-backed aygents with shared family and
+individual context. See [the native-memory handoff](docs/mem8-handoff.md),
+[the earlier repair handoff](docs/repair-handoff.md), and
+[validation evidence](docs/validation.md).
+
+The revision-6 receipt below is retained as history.
+
+# 8c.is room · revision 6 · 2026-11-01
 
 Family context version: 2
 Seed: `8b-is-family-seed-v1`
