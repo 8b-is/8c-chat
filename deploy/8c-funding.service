@@ -1,0 +1,9 @@
+[Unit]
+Description=Reconcile the shared 8c Stripe contribution pot
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/g8t/stripe.env
+ExecStart=/usr/bin/python3 /usr/local/share/8c-chat/funding.py --link plink_1UWs6EDSQm9BEFYlcwJ1uIxy --snapshot /var/lib/8c-funding/pool.json
+StateDirectory=8c-funding
+UMask=0022

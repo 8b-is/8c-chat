@@ -338,5 +338,6 @@ class Memory:
         # feed events become searchable conversation memories.
         ref = self.put("agent:" + agent["id"], f"generation:{job['id']}:{digest(encoded([result['text'], receipt]))}", "generation",
                        f"{agent['name']}: {result['text']}", self.cursor, self.source,
-                       {"job_id": job["id"], "state": "generated", "model": agent["model"], "digest": result["digest"], "recalled": receipt})
+                       {"job_id": job["id"], "state": "generated", "model": agent["model"], "digest": result["digest"], "recalled": receipt,
+                        "runtime": agent["runtime"], "provider": agent.get("provider", "local"), "inference": result.get("inference"), "work": result.get("work"), "session": result.get("session")})
         return self.verified(ref)[1]

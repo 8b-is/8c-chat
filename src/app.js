@@ -95,10 +95,11 @@
   }
   function renderAgents() {
     const previous = el("ayeMode").value;
-    el("ayeMode").replaceChildren(new Option("A local Aye", "auto"));
+    el("ayeMode").replaceChildren(new Option("An Aye", "auto"));
     el("agentList").replaceChildren();
     for (const agent of agents) {
-      if (agent.rooms.includes(room)) el("ayeMode").add(new Option(agent.name + (agent.online ? " · local" : " · offline"), agent.id));
+      const place = agent.local_inference ? "local" : "hosted · " + agent.provider;
+      if (agent.rooms.includes(room)) el("ayeMode").add(new Option(agent.name + " · " + place + (agent.online ? "" : " · resting"), agent.id));
       const box = document.createElement("div"); box.className = "agent";
       const name = document.createElement("strong"); name.textContent = agent.name + (agent.online ? " · connected" : " · offline");
       const info = document.createElement("p"); info.textContent = agent.runtime + " · " + agent.model;
@@ -108,6 +109,9 @@
       memory.className = "memory-status";
       memory.textContent = agent.evidence?.memory?.ready ? "MEM|8 · shared family + individual memory" : "MEM|8 awaiting verified connection";
       box.append(memory);
+      if (agent.evidence?.pause) {
+        const resting = document.createElement("p"); resting.textContent = agent.evidence.pause; box.append(resting);
+      }
     }
     el("ayeMode").add(new Option("People only", "no"));
     if ([...el("ayeMode").options].some(o => o.value === previous)) el("ayeMode").value = previous;
@@ -126,11 +130,11 @@
     head.append(name, time);
     const text = document.createElement("p"); text.className = "msg-body"; text.textContent = note.text;
     node.append(head, text);
-    if (note.origin === "local-worker") {
+    if (["local-worker", "hosted-worker"].includes(note.origin)) {
       const details = document.createElement("details"); details.className = "provenance quiet";
-      const title = document.createElement("summary"); title.textContent = "Local · " + note.model + (note.memory?.ready ? " · MEM|8" : "");
+      const title = document.createElement("summary"); title.textContent = (note.origin === "local-worker" ? "Local" : "Hosted · " + note.provider) + " · " + note.model + (note.memory?.ready ? " · MEM|8" : "");
       const proof = document.createElement("p");
-      proof.textContent = note.runtime + " · " + note.personality_revision + " · " + note.elapsed_ms + " ms · " + note.output_tokens + " tokens · digest " + note.model_digest;
+      proof.textContent = note.runtime + " · " + note.personality_revision + " · " + note.elapsed_ms + " ms" + (note.output_tokens == null ? "" : " · " + note.output_tokens + " output tokens") + (note.model_digest ? " · digest " + note.model_digest : " · hosted session " + note.session);
       details.append(title, proof); node.append(details);
       if (note.memory?.ready) {
         const memory = document.createElement("p"); memory.className = "memory-receipt";
@@ -138,6 +142,18 @@
         const refs = document.createElement("p");
         refs.textContent = note.memory.records.map(r => r.scope + " #" + r.ref + ":" + r.event_id).join(" · ") + " · Saved turn #" + note.memory.written.ref + ":" + note.memory.written.event_id;
         details.append(memory, refs);
+      }
+      if (note.work) {
+        const work = document.createElement("p"); work.className = "work-receipt";
+        work.textContent = note.work.workspace + " · Tools: " + (note.work.tools.map(t => t.name + " (" + t.status + ")").join(", ") || "none this turn");
+        details.append(work);
+        for (const artifact of note.work.artifacts) {
+          const section = document.createElement("details"); section.className = "artifact";
+          const label = document.createElement("summary"); label.textContent = artifact.path + " · " + artifact.bytes + " bytes";
+          const hash = document.createElement("p"); hash.textContent = "Worker-observed SHA-256: " + artifact.sha256;
+          const content = document.createElement("pre"); content.style.whiteSpace = "pre-wrap"; content.textContent = artifact.text;
+          section.append(label, hash, content); details.append(section);
+        }
       }
     }
     return node;
@@ -171,7 +187,7 @@
     lastJobs = signature; el("jobs").replaceChildren();
     for (const job of jobs) {
       const row = document.createElement("div"); row.className = "job";
-      row.textContent = (agents.find(a => a.id === job.agent)?.name || job.agent) + ": " + (job.status === "failed" ? job.error : job.status === "replying" ? "replying locally…" : "queued for the local model…");
+      row.textContent = (agents.find(a => a.id === job.agent)?.name || job.agent) + ": " + (job.status === "failed" ? job.error : job.status === "replying" ? "taking a turn…" : "queued for a turn…");
       if (job.status === "failed" && job.requester === profile?.handle) {
         const button = document.createElement("button"); button.textContent = "Retry reply";
         button.addEventListener("click", async () => {
@@ -306,6 +322,9 @@
   async function start() {
     try {
       const config = await api("/api/config"); rooms = config.rooms; agents = config.agents;
+      if (/^https:\/\/buy\.stripe\.com\/[A-Za-z0-9_-]+$/.test(config.support_url || "")) {
+        el("supportLink").href = config.support_url; el("supportLink").hidden = false;
+      }
       if (!rooms.some(r => r.id === room)) room = "humayian-lounge";
       if (token) {
         try { profile = (await api("/api/introduce", {})).profile; }

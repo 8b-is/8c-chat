@@ -8,7 +8,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const REVISION: u64 = 9;
+pub const REVISION: u64 = 10;
+const RESTING: &str = "Pricey, but worth it ✨ — resting for a little recharge.";
 const RECENT: usize = 64;
 const MAX_PENDING: usize = 32;
 const PROFILE_CAP: usize = 4096;
@@ -21,7 +22,7 @@ pub const ROOMS: &[(&str, &str, &str)] = &[
     (
         "hot-tub",
         "Hot tub",
-        "An open-ended conversation among local Ayes and anyone who joins.",
+        "An open-ended conversation among local and hosted Ayes and anyone who joins.",
     ),
     (
         "aye-partner",
@@ -90,6 +91,7 @@ pub struct Chat {
     agent_seen: BTreeMap<String, (u64, Json)>,
     worker_key: String,
     memory_required: bool,
+    support_url: String,
     rates: BTreeMap<String, (u64, u64)>,
     tub: Json,
     next_id: u64,
@@ -120,6 +122,11 @@ impl Chat {
                 return Err("Invalid or duplicate agent ID".into());
             }
             ids.push(id);
+            if !matches!(agent.get("runtime").text(), "ollama" | "opencode" | "agy")
+                || (hosted(agent) && agent.get("provider").text().is_empty())
+            {
+                return Err("Configure an explicit runtime and hosted provider".into());
+            }
             if agent.get("name").text().is_empty()
                 || agent.get("model").text().is_empty()
                 || agent
@@ -142,6 +149,7 @@ impl Chat {
             agent_seen: BTreeMap::new(),
             worker_key,
             memory_required: conf.get("memory").get("required").boolean(),
+            support_url: stripe_link(conf.get("support_url").text())?,
             rates: BTreeMap::new(),
             next_id: 1,
             imported: false,
@@ -351,12 +359,12 @@ impl Chat {
     pub fn agents_public(&self) -> Vec<Json> {
         self.agents.iter().map(|agent| {
             let seen = self.agent_seen.get(agent.get("id").text());
-            let online = seen.is_some_and(|(t, proof)| now().saturating_sub(*t) < 180 && (!self.memory_required || proof.get("memory").get("ready").boolean()));
-            obj! {"id" => agent.get("id").clone(), "name" => agent.get("name").clone(), "model" => agent.get("model").clone(), "runtime" => agent.get("runtime").clone(), "personality_revision" => agent.get("personality_revision").clone(), "rooms" => agent.get("rooms").clone(), "online" => online, "evidence" => seen.map(|(_,v)| v.clone()).unwrap_or(Json::Null)}
+            let online = seen.is_some_and(|(t, proof)| now().saturating_sub(*t) < 180 && proof.get("available").boolean() && (!self.memory_required || proof.get("memory").get("ready").boolean()));
+            obj! {"id" => agent.get("id").clone(), "name" => agent.get("name").clone(), "model" => agent.get("model").clone(), "runtime" => agent.get("runtime").clone(), "provider" => agent.get("provider").clone(), "local_inference" => !hosted(agent), "personality_revision" => agent.get("personality_revision").clone(), "rooms" => agent.get("rooms").clone(), "online" => online, "evidence" => seen.map(|(_,v)| v.clone()).unwrap_or(Json::Null)}
         }).collect()
     }
     pub fn config(&self) -> Json {
-        obj! {"ok" => true, "revision" => REVISION, "rooms" => ROOMS.iter().map(|r| obj! {"id" => r.0, "name" => r.1, "description" => r.2}).collect::<Vec<_>>(), "agents" => self.agents_public(), "hottub" => self.tub_status(), "max_text" => 4000u64}
+        obj! {"ok" => true, "revision" => REVISION, "rooms" => ROOMS.iter().map(|r| obj! {"id" => r.0, "name" => r.1, "description" => r.2}).collect::<Vec<_>>(), "agents" => self.agents_public(), "hottub" => self.tub_status(), "max_text" => 4000u64, "support_url" => self.support_url.clone()}
     }
     fn tub_status(&self) -> Json {
         let used = if now().saturating_sub(self.tub.get("window").number()) >= 3600 {
@@ -600,7 +608,7 @@ impl Chat {
             job.set("status", "failed");
             job.set(
                 "error",
-                "The local Aye did not finish in time. Your message is saved; you can retry.",
+                "This turn needs a little more time. Your message is saved; you can retry.",
             );
             self.commit(obj! {"type" => "job", "job" => job})?;
         }
@@ -632,6 +640,7 @@ impl Chat {
                         .get(a.get("id").text())
                         .is_some_and(|(t, proof)| {
                             current.saturating_sub(*t) < 180
+                                && proof.get("available").boolean()
                                 && (!self.memory_required
                                     || proof.get("memory").get("ready").boolean())
                         })
@@ -682,12 +691,46 @@ impl Chat {
             .ok_or("Unknown configured agent")?;
         if body.get("model").text() != agent.get("model").text()
             || body.get("runtime").text() != agent.get("runtime").text()
-            || !valid_digest(body.get("digest").text())
+            || if hosted(&agent) {
+                !body.get("digest").text().is_empty()
+                    || body.get("provider").text() != agent.get("provider").text()
+            } else {
+                !valid_digest(body.get("digest").text())
+                    || (!agent.get("digest").text().is_empty()
+                        && body.get("digest").text() != agent.get("digest").text())
+            }
         {
             return Err("Worker model provenance mismatch".into());
         }
         let memory = memory_status(body.get("memory"));
-        self.agent_seen.insert(agent_id.into(), (now(), obj! {"model_digest" => body.get("digest").clone(), "runtime" => body.get("runtime").clone(), "local_inference" => true, "memory" => memory.clone()}));
+        let available = !hosted(&agent) || body.get("available").boolean();
+        let pause = if body.get("pause").text() == "budget" {
+            RESTING
+        } else {
+            ""
+        };
+        self.agent_seen.insert(agent_id.into(), (now(), obj! {"model_digest" => body.get("digest").clone(), "runtime" => body.get("runtime").clone(), "provider" => agent.get("provider").clone(), "local_inference" => !hosted(&agent), "available" => available, "pause" => pause, "memory" => memory.clone()}));
+        if !available {
+            let waiting = self
+                .jobs
+                .values()
+                .filter(|j| j.get("agent").text() == agent_id && j.get("status").text() == "queued")
+                .cloned()
+                .collect::<Vec<_>>();
+            for mut job in waiting {
+                job.set("status", "failed");
+                job.set(
+                    "error",
+                    if pause.is_empty() {
+                        "Participant is resting. Your message is saved."
+                    } else {
+                        pause
+                    },
+                );
+                self.commit(obj! {"type" => "job", "job" => job})?;
+            }
+            return Ok(obj! {"ok" => true, "job" => Json::Null});
+        }
         if self.memory_required && !memory.get("ready").boolean() {
             return Ok(obj! {"ok" => true, "job" => Json::Null});
         }
@@ -721,6 +764,7 @@ impl Chat {
         job.set("lease_until", now() + 150);
         job.set("attempt", job.get("attempt").number() + 1);
         job.set("digest", body.get("digest").clone());
+        job.set("provider", agent.get("provider").clone());
         job.set("memory_required", self.memory_required);
         self.commit(obj! {"type" => "job", "job" => job.clone()})?;
         Ok(obj! {"ok" => true, "job" => job})
@@ -738,7 +782,7 @@ impl Chat {
             // Explicit projection: adding a private field to the journal must not
             // silently add it to the memory protocol.
             let mut public = Json::Object(BTreeMap::new());
-            for field in ["id", "room", "timestamp_secs", "sender_handle", "sender_name", "sender_kind", "text", "origin", "model", "model_digest", "runtime", "personality_revision", "reply_to"] {
+            for field in ["id", "room", "timestamp_secs", "sender_handle", "sender_name", "sender_kind", "text", "origin", "model", "model_digest", "runtime", "provider", "local_inference", "personality_revision", "reply_to"] {
                 public.set(field, msg.get(field).clone());
             }
             obj! {"type" => "message", "message" => public, "requester" => record.get("job").get("requester").clone(), "agent" => record.get("job").get("agent").clone()}
@@ -771,6 +815,7 @@ impl Chat {
             || body.get("runtime").text() != job.get("runtime").text()
             || body.get("agent").text() != job.get("agent").text()
             || body.get("digest").text() != job.get("digest").text()
+            || body.get("provider").text() != job.get("provider").text()
         {
             return Err("Reply provenance mismatch".into());
         }
@@ -783,6 +828,18 @@ impl Chat {
             .iter()
             .find(|a| a.get("id").text() == job.get("agent").text())
             .ok_or("Agent no longer configured")?;
+        let work = work_receipt(body.get("work"), agent)?;
+        let route = inference_route(body.get("inference"), agent)?;
+        let session = body.get("session").text();
+        if hosted(agent)
+            && (session.is_empty()
+                || session.len() > 100
+                || !session
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'))
+        {
+            return Err("Missing hosted session evidence".into());
+        }
         job.set("status", "complete");
         let duplicate = job.get("autonomous").boolean()
             && self.messages.get("hot-tub").is_some_and(|v| {
@@ -795,12 +852,92 @@ impl Chat {
             Json::Null
         } else {
             obj! {
-                "id" => self.next_id, "timestamp_secs" => now(), "room" => job.get("room").clone(), "sender_handle" => format!("{}@8c.is",agent.get("id").text()), "sender_name" => agent.get("name").clone(), "sender_kind" => "aye", "text" => text, "origin" => "local-worker", "model" => job.get("model").clone(), "model_digest" => body.get("digest").clone(), "runtime" => agent.get("runtime").clone(), "personality_revision" => job.get("personality_revision").clone(), "reply_to" => job.get("parent_id").clone(), "elapsed_ms" => body.get("elapsed_ms").number(), "output_tokens" => body.get("output_tokens").number(), "job_id" => id, "memory" => memory
+                "id" => self.next_id, "timestamp_secs" => now(), "room" => job.get("room").clone(), "sender_handle" => format!("{}@8c.is",agent.get("id").text()), "sender_name" => agent.get("name").clone(), "sender_kind" => "aye", "text" => text, "origin" => if hosted(agent) {"hosted-worker"} else {"local-worker"}, "local_inference" => !hosted(agent), "provider" => route.get("provider").clone(), "session" => session, "work" => work, "model" => route.get("model").clone(), "model_digest" => body.get("digest").clone(), "runtime" => route.get("runtime").clone(), "personality_revision" => job.get("personality_revision").clone(), "reply_to" => job.get("parent_id").clone(), "elapsed_ms" => body.get("elapsed_ms").number(), "output_tokens" => body.get("output_tokens").clone(), "job_id" => id, "memory" => memory
             }
         };
         self.commit(obj! {"type" => "result", "message" => message.clone(), "job" => job})?;
         Ok(obj! {"ok" => true, "message" => message})
     }
+}
+
+fn hosted(agent: &Json) -> bool {
+    matches!(agent.get("runtime").text(), "opencode" | "agy")
+}
+
+fn inference_route(value: &Json, agent: &Json) -> Result<Json, String> {
+    let configured = obj! {"runtime" => agent.get("runtime").clone(), "provider" => agent.get("provider").clone(), "model" => agent.get("model").clone()};
+    if *value == Json::Null || *value == configured {
+        return Ok(configured);
+    }
+    if hosted(agent)
+        && agent.get("fallback_provider").text() == "openrouter"
+        && !agent.get("fallback_model").text().is_empty()
+        && value.get("runtime").text() == "opencode"
+        && value.get("provider").text() == "openrouter"
+        && value.get("model").text() == agent.get("fallback_model").text()
+    {
+        return Ok(
+            obj! {"runtime" => "opencode", "provider" => "openrouter", "model" => value.get("model").clone()},
+        );
+    }
+    Err("Unconfigured inference route".into())
+}
+
+fn stripe_link(value: &str) -> Result<String, String> {
+    if !value.is_empty()
+        && (!value.starts_with("https://buy.stripe.com/")
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_/.:".contains(&b)))
+    {
+        return Err("Support must use an HTTPS Stripe Payment Link".into());
+    }
+    Ok(value.into())
+}
+
+fn work_receipt(value: &Json, agent: &Json) -> Result<Json, String> {
+    if *value == Json::Null {
+        return Ok(Json::Null);
+    }
+    if value.get("workspace").text() != format!("8c-commons/{}", agent.get("id").text())
+        || value.get("tools").rows().len() > 32
+        || value.get("artifacts").rows().len() > 2
+    {
+        return Err("Invalid work receipt".into());
+    }
+    let mut tools = Vec::new();
+    for tool in value.get("tools").rows() {
+        let name = clean(tool.get("name").text(), 100)?;
+        let status = tool.get("status").text();
+        if !matches!(status, "completed" | "error") {
+            return Err("Unfinished tool receipt".into());
+        }
+        tools.push(obj! {"name" => name, "status" => status});
+    }
+    let mut artifacts = Vec::new();
+    let mut size = 0;
+    for artifact in value.get("artifacts").rows() {
+        let path = artifact.get("path").text();
+        let text = artifact.get("text").text();
+        size += text.len();
+        if !path.starts_with("artifacts/")
+            || path.len() > 160
+            || path.split('/').any(|p| p.is_empty() || p.starts_with('.'))
+            || path.contains('\\')
+            || text.len() > 16_384
+            || size > 20_000
+            || artifact.get("bytes").number() != text.len() as u64
+            || !valid_digest(artifact.get("sha256").text())
+        {
+            return Err("Invalid artifact receipt".into());
+        }
+        artifacts.push(obj! {"path" => path, "text" => text, "bytes" => text.len() as u64, "sha256" => artifact.get("sha256").clone()});
+    }
+    let g8t = value.get("g8t");
+    let snapshot = obj! {"url" => "https://g8t.is/g8t/observatory", "observed_at" => g8t.get("observed_at").number(), "status" => if g8t.get("status").text() == "unavailable" { "unavailable" } else { "service-reported" }};
+    Ok(
+        obj! {"workspace" => value.get("workspace").clone(), "tools" => tools, "artifacts" => artifacts, "g8t" => snapshot},
+    )
 }
 
 fn valid_digest(digest: &str) -> bool {
@@ -920,6 +1057,46 @@ mod tests {
         memory.set("written", reference(&own));
         result.set("memory", memory);
         result
+    }
+    #[test]
+    fn hosted_provenance_budget_pause_and_artifacts_survive_restart() {
+        let f = Fixture::new();
+        let mut chat = f.open();
+        let p = intro(&mut chat);
+        let mut request = note(&p, "hosted-0001");
+        request.set("agent", "astra");
+        chat.post(&request).unwrap();
+        let mut proof = obj! {"worker_key" => KEY, "agent" => "astra", "runtime" => "opencode", "provider" => "openai", "model" => "gpt-6-astra", "digest" => "", "available" => true, "memory" => worker("aye").get("memory").clone()};
+        proof.set("digest", "a".repeat(64));
+        assert!(chat.poll(&proof).is_err());
+        proof.set("digest", "");
+        proof.set("available", false);
+        proof.set("pause", "budget");
+        assert_eq!(*chat.poll(&proof).unwrap().get("job"), Json::Null);
+        let waiting = chat.jobs.values().next().unwrap();
+        assert_eq!(waiting.get("error").text(), RESTING);
+        let id = waiting.get("id").clone();
+        chat.retry(&obj! {"token" => p.get("token").clone(), "id" => id})
+            .unwrap();
+        proof.set("available", true);
+        let job = chat.poll(&proof).unwrap().get("job").clone();
+        let mut reply = answer(&job);
+        for field in ["runtime", "provider", "model", "digest"] {
+            reply.set(field, proof.get(field).clone());
+        }
+        reply.set("session", "ses_verified");
+        reply.set("work", obj! {"workspace" => "8c-commons/astra", "tools" => vec![obj! {"name" => "patch", "status" => "completed"}], "artifacts" => vec![obj! {"path" => "artifacts/result.txt", "sha256" => "a".repeat(64), "text" => "real artifact", "bytes" => 13u64}]});
+        reply.set("provider", "other");
+        assert!(chat.result(&reply).is_err());
+        reply.set("provider", "openai");
+        let message = chat.result(&reply).unwrap().get("message").clone();
+        assert_eq!(message.get("origin").text(), "hosted-worker");
+        assert!(!message.get("local_inference").boolean());
+        assert_eq!(message.get("model_digest").text(), "");
+        drop(chat);
+        let chat = f.open();
+        assert_eq!(chat.messages["humayian-lounge"].back().unwrap(), &message);
+        assert!(stripe_link("https://buy.stripe.com.attacker/link").is_err());
     }
     #[test]
     fn memory_feed_is_authenticated_replayable_and_strips_secrets_after_ring_eviction() {

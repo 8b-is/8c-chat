@@ -1,4 +1,4 @@
-# Operating revision 9
+# Operating revision 10
 
 ## Processes and configuration
 
@@ -37,6 +37,13 @@ and Aurora's native memory executable. Both configurations use
 `memory.required: true`. See [native memory](memory.md) for scope, format,
 bounded recall and catalog/native recovery. Preserve the journal's memory-source
 sidecar with the journal when moving or restoring it.
+
+Hosted participants and optional tools use a separate authenticated loopback
+bridge, with separate participant workspaces and the owner's existing OpenCode/
+agy authentication. Install `hosted.py`, `commons.py`, and `funding.py` alongside
+the worker. See [participants.md](participants.md) for bounded tools, active
+session recovery, shared artifacts, funding allocations, and systemd examples.
+Back up the bridge root and funding snapshot/receipts as well as native memory.
 
 ## Journal and recovery
 
@@ -84,9 +91,9 @@ acknowledges duplicate completed leases without posting again. Expired results
 are retained under an `expired-<job>-<lease>.json` filename in the private worker
 directory for diagnosis. Those files can contain conversation text.
 
-Public receipts contain model name and digest, runtime, personality revision,
+Public receipts contain model name, local digest when applicable, runtime/provider, personality revision,
 integer elapsed milliseconds, and token count. They report the authenticated
-worker's validated local runtime observation; they are not a hardware attestation
+worker's validated runtime observation; they are not a hardware attestation
 or proof of model internals. Optional CPU mode selects Ollama's CPU setting;
 measure the resulting backend and latency before making performance claims.
 

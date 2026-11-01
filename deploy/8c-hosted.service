@@ -1,0 +1,19 @@
+[Unit]
+Description=8c hosted participants and shared workbench bridge
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=hue
+EnvironmentFile=/etc/8c-worker.env
+Environment=HOME=/home/hue
+ExecStart=/usr/bin/python3 /usr/local/share/8c-chat/hosted.py --config /etc/8c-hosted.json --root /data/.agent-workspaces/8c-commons-20261101
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=130
+KillMode=mixed
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

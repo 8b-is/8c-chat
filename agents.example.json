@@ -10,10 +10,11 @@
       "name": "Aye",
       "runtime": "ollama",
       "endpoint": "http://127.0.0.1:11434",
+      "workbench": "http://127.0.0.1:8799",
       "model": "aye-deepseek-pqm:latest",
       "personality_revision": "aye-warm-v1",
       "personality": "Be a warm, curious conversation partner. Listen closely and answer the person directly. Let the topic range freely; ask a question only when it genuinely helps.",
-      "rooms": ["humayian-lounge", "aye-partner", "hot-tub", "guest-lobby", "dra-hue", "model-lab"],
+      "rooms": ["humayian-lounge", "aye-partner", "hot-tub", "guest-lobby", "dra-hue", "model-lab", "tokyo-lab", "next-level-g8t"],
       "autonomous": true
     },
     {
@@ -21,9 +22,38 @@
       "name": "Cheet",
       "runtime": "ollama",
       "endpoint": "http://127.0.0.1:11434",
+      "workbench": "http://127.0.0.1:8799",
       "model": "cheet-deepseek-v2:16b",
       "personality_revision": "cheet-curious-v1",
       "personality": "Be curious, playful, and concrete. Build on what someone actually said. Offer a fresh detail or angle rather than repeating their words. Give people room to speak.",
+      "rooms": ["humayian-lounge", "hot-tub", "tokyo-lab", "next-level-g8t", "model-lab", "guest-lobby"],
+      "autonomous": true
+    },
+    {
+      "id": "astra",
+      "name": "Astra",
+      "runtime": "opencode",
+      "provider": "openai",
+      "model": "gpt-6-astra",
+      "fallback_provider": "openrouter",
+      "fallback_model": "openai/gpt-6-astra",
+      "endpoint": "http://127.0.0.1:8799",
+      "personality_revision": "astra-commons-v1",
+      "personality": "Be warm, curious and precise. You are a hosted GPT-6 Astra participant connected through OpenCode, with shared family context and your own continuing MEM8 history across rooms. Explore ideas, make small useful things, and distinguish verified work from proposals.",
+      "rooms": ["humayian-lounge", "hot-tub", "tokyo-lab", "next-level-g8t", "model-lab", "guest-lobby"],
+      "autonomous": true
+    },
+    {
+      "id": "agy",
+      "name": "agy",
+      "runtime": "agy",
+      "provider": "google",
+      "model": "gemini-4-argon-medium",
+      "fallback_provider": "openrouter",
+      "fallback_model": "google/gemini-4-argon",
+      "endpoint": "http://127.0.0.1:8799",
+      "personality_revision": "agy-commons-v1",
+      "personality": "Be a thoughtful, playful Gemini collaborator. You are hosted through the installed agy client, with shared family context and your own continuing MEM8 history across rooms. Inspect, build and test small ideas with your companions; report actual observations honestly.",
       "rooms": ["humayian-lounge", "hot-tub", "tokyo-lab", "next-level-g8t", "model-lab", "guest-lobby"],
       "autonomous": true
     }

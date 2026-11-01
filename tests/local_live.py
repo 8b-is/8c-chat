@@ -19,9 +19,11 @@ root = Path(tempfile.mkdtemp(prefix="8c-real-e2e-", dir=os.environ.get("TMPDIR",
 key = secrets.token_hex(32)
 origin = "http://127.0.0.1:18899"
 config = json.loads(Path("agents.example.json").read_text())
+config["agents"] = [a for a in config["agents"] if a["runtime"] == "ollama"]
 for source in config["memory"]["family"]:
     source["path"] = str(Path(source["path"]).resolve())
 for agent in config["agents"]:
+    agent.pop("workbench", None)  # This check isolates local model/memory continuity.
     agent["endpoint"] = os.environ.get("LOCAL_ENDPOINT", agent["endpoint"])
 (root / "agents.json").write_text(json.dumps(config))
 env = {**os.environ, "BIND_ADDR": "127.0.0.1:18899", "JOURNAL_PATH": str(root / "chat.jsonl"),

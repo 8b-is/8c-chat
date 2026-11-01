@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh verified 8c shared contributions each minute
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=60
+Unit=8c-funding.service
+
+[Install]
+WantedBy=timers.target

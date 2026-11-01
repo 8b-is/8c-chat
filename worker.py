@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""8c local inference worker. Python stdlib; inference never leaves literal loopback.
+"""8c memory and delivery worker, with explicit local and hosted adapters.
 
-HTTPS is used only for chat jobs/results. No model pulling or fallback. A single
-locked spool retains a finished result until the server acknowledges it.
+Ollama inference never leaves literal loopback. Hosted participants use a separate
+authenticated loopback bridge to the owner's provider clients. A single locked
+spool retains a finished result until the server acknowledges it.
 """
 import argparse
 import fcntl
@@ -20,6 +21,21 @@ import urllib.request
 from memory import Memory, MemoryFault
 
 LIMIT = 1_048_576
+HOSTED = ("opencode", "agy")
+
+
+class ParticipantResting(ValueError):
+    pass
+
+
+def bridge(agent, path, job=None, timeout=15):
+    body = {"worker_key": os.environ.get("WORKER_KEY", ""), "agent": agent["id"], "runtime": agent["runtime"], "model": agent["model"]}
+    if job is not None:
+        body["job"] = job
+    result = request(agent.get("workbench", agent["endpoint"]) if path.startswith("/workspace") or path == "/accept" else agent["endpoint"], path, body, timeout=timeout, inference=True)
+    if not result.get("ok"):
+        raise ParticipantResting("Pricey, but worth it ✨ — resting for a little recharge." if result.get("pause") == "budget" else "Participant is resting; your message is saved. Please retry shortly.")
+    return result
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -61,6 +77,9 @@ def request(origin, path, body=None, timeout=15, inference=False):
 
 
 def inventory(agent):
+    if agent.get("runtime") in HOSTED:
+        bridge(agent, "/inventory")
+        return ""
     if agent.get("runtime") != "ollama":
         raise ValueError("This worker supports the Ollama adapter; configure actual runtimes explicitly")
     local = endpoint(agent["endpoint"], inference=True)
@@ -88,6 +107,10 @@ def visible_text(text):
 
 
 def infer(agent, job):
+    if agent["runtime"] in HOSTED:
+        if any(job[k] != agent[k] for k in ("model", "runtime")) or job["agent"] != agent["id"] or job.get("digest"):
+            raise ValueError("Hosted job provenance mismatch")
+        return bridge(agent, "/infer", job, timeout=110)
     digest = inventory(agent)
     if job["digest"] != digest or job["model"] != agent["model"] or job["runtime"] != agent["runtime"] or job["agent"] != agent["id"]:
         raise ValueError("Job/model provenance mismatch")
@@ -95,10 +118,40 @@ def infer(agent, job):
     if agent.get("cpu_only"):
         options["num_gpu"] = 0
     start = time.monotonic_ns()
-    result = request(agent["endpoint"], "/api/generate", {
-        "model": agent["model"], "prompt": job["prompt"], "system": job["system"], "stream": False,
-        "options": options, "keep_alive": "5m",
-    }, timeout=95, inference=True)
+    prompt = job["prompt"]
+    workbench = agent.get("workbench")
+    if workbench:
+        try:
+            context = bridge(agent, "/workspace-start", job)["context"]
+            prompt += "\n" + context + '\nYou have an authorized isolated workbench. If needed, respond ONLY with one JSON object: {"tool":"list"}, {"tool":"read","path":"relative/file"}, {"tool":"write","path":"artifacts/name.txt","text":"contents"}, or {"tool":"run","command":"command"}. Use tools to perform requested work, never claim unperformed actions. After tool results, answer normally. Two tool calls maximum.\n'
+        except (OSError, ValueError):
+            workbench = False
+            prompt += "\nThe workbench is currently unavailable. Converse normally using your native memories; do not claim file or tool access this turn.\n"
+    tokens = 0
+    for step in range(3):
+        result = request(agent["endpoint"], "/api/generate", {
+            "model": agent["model"], "prompt": prompt, "system": job["system"], "stream": False,
+            "options": options, "keep_alive": "5m",
+        }, timeout=95, inference=True)
+        if result.get("error") or not result.get("done") or result.get("model") != agent["model"]:
+            raise ValueError("Local runtime did not finish a reply")
+        count = result.get("eval_count", 0)
+        if type(count) is not int or count < 0:
+            raise ValueError("Invalid token count")
+        tokens += count
+        text = visible_text(result.get("response", ""))
+        try:
+            action = json.loads(text.removeprefix('```json').removesuffix('```').strip()) if workbench else None
+        except ValueError:
+            action = None
+        if not isinstance(action, dict) or "tool" not in action:
+            break
+        if step == 2:
+            raise ValueError("Local workbench turn exceeded two tool calls")
+        observation = bridge(agent, "/workspace-tool", {**job, "action": action, "sequence": step})
+        prompt += "\nTool request: " + json.dumps(action) + "\nObserved tool result: " + json.dumps(observation["result"], ensure_ascii=False)[:4000]
+        if step == 1:
+            prompt += "\nTool budget finished. Answer the participant now, using only observed results.\n"
     elapsed = (time.monotonic_ns() - start) // 1_000_000
     if result.get("error") or not result.get("done") or result.get("model") != agent["model"]:
         raise ValueError("Local runtime did not finish a reply")
@@ -107,10 +160,10 @@ def infer(agent, job):
         raise ValueError("Local model returned an empty or oversized reply")
     if inventory(agent) != digest:
         raise ValueError("Model changed during inference")
-    tokens = result.get("eval_count", 0)
-    if not isinstance(tokens, int) or tokens < 0:
-        raise ValueError("Invalid token count")
-    return {"text": text, "digest": digest, "elapsed_ms": elapsed, "output_tokens": tokens}
+    answer = {"text": text, "digest": digest, "elapsed_ms": elapsed, "output_tokens": tokens}
+    if workbench:
+        answer["work"] = bridge(agent, "/workspace-result", {**job, "generation": answer})["work"]
+    return answer
 
 
 def save(path, value):
@@ -131,7 +184,7 @@ def sync_directory(path):
         os.close(fd)
 
 
-def deliver(origin, key, pending):
+def deliver(origin, key, pending, agents=()):
     body = json.loads(pending.read_text())
     try:
         reply = request(origin, "/api/worker/result", {**body, "worker_key": key})
@@ -150,6 +203,11 @@ def deliver(origin, key, pending):
         sync_directory(pending.parent)
         print("Reply expired/cancelled; server exposes a retry", flush=True)
         return True
+    # Publish peer artifacts only after the chat server accepted this turn.
+    if body.get("work") and not body.get("error"):
+        agent = next((a for a in agents if a["id"] == body["agent"]), None)
+        if agent is not None:
+            bridge(agent, "/accept", {"id": body["id"], "lease": body["lease"], "room": body["room"]})
     pending.unlink()
     sync_directory(pending.parent)
     print("Reply acknowledged", flush=True)
@@ -178,7 +236,9 @@ def work(config, origin, directory):
         raise ValueError("Configure 1–16 agents")
     for agent in agents:
         endpoint(agent["endpoint"], inference=True)
-        if agent["runtime"] != "ollama":
+        if agent.get("workbench"):
+            endpoint(agent["workbench"], inference=True)
+        if agent["runtime"] not in ("ollama", *HOSTED):
             raise ValueError("Unsupported runtime")
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -190,7 +250,7 @@ def work(config, origin, directory):
         while True:
             try:
                 if pending.exists():
-                    if not deliver(origin, key, pending):
+                    if not deliver(origin, key, pending, agents):
                         time.sleep(3)
                         continue
                 if not sync_memory(memory, origin, key):
@@ -202,11 +262,14 @@ def work(config, origin, directory):
                             cached = (time.monotonic_ns(), inventory(agent))
                             inventory_cache[agent["id"]] = cached
                         proof = {"agent": agent["id"], "model": agent["model"], "runtime": agent["runtime"], "digest": cached[1], "memory": memory.status()}
+                        if agent["runtime"] in HOSTED:
+                            state = bridge(agent, "/inventory")
+                            proof.update(provider=agent["provider"], available=state["available"], pause=state["pause"], workspace=state["workspace"])
                         reply = request(origin, "/api/worker/poll", {**proof, "worker_key": key})
                         job = reply.get("job")
                         if not reply.get("ok") or not job:
                             continue
-                        result = {**proof, "id": job["id"], "lease": job["lease"]}
+                        result = {**proof, "id": job["id"], "lease": job["lease"], "room": job["room"]}
                         try:
                             # A request may have arrived after the preceding feed page.
                             if not sync_memory(memory, origin, key):
@@ -217,18 +280,23 @@ def work(config, origin, directory):
                             child = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--infer"],
                                 input=json.dumps({"agent": agent, "job": prepared}), text=True,
                                 capture_output=True, timeout=115, check=True)
-                            result.update(json.loads(child.stdout))
+                            generated = json.loads(child.stdout)
+                            if generated.get("error"):
+                                raise ParticipantResting(generated["error"])
+                            result.update(generated)
                             receipt["written"] = memory.remember_generation(agent, job, result, receipt)
                             result["memory"] = receipt
+                        except ParticipantResting as error:
+                            result["error"] = str(error)
                         except MemoryFault:
                             result["error"] = "Native MEM|8 could not be verified. Your message is saved; please retry after memory recovery."
                             request(origin, "/api/worker/poll", {**proof, "memory": memory.status(False), "worker_key": key})
                         except subprocess.TimeoutExpired:
-                            result["error"] = "Local inference exceeded its 115-second deadline. Please retry."
+                            result["error"] = "This turn needs a little more time. Your message is saved; please retry."
                         except (subprocess.CalledProcessError, ValueError):
-                            result["error"] = "Local model could not produce a reply. Please retry."
+                            result["error"] = "Participant is resting; your message is saved. Please retry shortly."
                         save(pending, result)
-                        deliver(origin, key, pending)
+                        deliver(origin, key, pending, agents)
                         break
                     except (OSError, ValueError, KeyError) as error:
                         # Log only the error class: URLs/response text may contain private context.
@@ -252,7 +320,10 @@ def work(config, origin, directory):
 if __name__ == "__main__":
     if sys.argv[1:] == ["--infer"]:
         payload = json.loads(sys.stdin.read(LIMIT))
-        print(json.dumps(infer(payload["agent"], payload["job"])))
+        try:
+            print(json.dumps(infer(payload["agent"], payload["job"])))
+        except ParticipantResting as error:
+            print(json.dumps({"error": str(error)}))
     else:
         parser = argparse.ArgumentParser(description=__doc__)
         parser.add_argument("--config", default="agents.example.json")

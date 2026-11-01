@@ -101,7 +101,7 @@ async function run() {
     // The worker result route is exercised with an explicitly test-only reply.
     await a.locator('[data-room="aye-partner"]').click(); await a.locator("#ayeMode").selectOption("aye");
     await a.locator("#msgInput").fill("Exercise queued reply and retry controls"); await a.locator("#sendBtn").click();
-    await a.getByText("Aye: queued for the local model…",{exact:true}).waitFor();
+    await a.getByText("Aye: queued for a turn…",{exact:true}).waitFor();
     const ref=scope=>({scope,ref:"c".repeat(64),event_id:1,payload_sha256:"d".repeat(64),snippet_sha256:"e".repeat(64),bytes:10});
     const memory={ready:true,format:"MEM8EV02",binary_sha256:"b".repeat(64),records:[ref("family"),ref("agent:aye")],written:ref("agent:aye")};
     const proof={worker_key:key,agent:"aye",runtime:"ollama",model:"aye-deepseek-pqm:latest",digest:"a".repeat(64),memory};
