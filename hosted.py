@@ -287,6 +287,9 @@ src/page.html, src/app.js, src/chat.rs, docs/, or tests/) to artifacts/8c.patch 
 run `/usr/local/libexec/8c-run '8c-self-deploy status'`, `'8c-self-deploy check'`,
 `'8c-self-deploy patch artifacts/8c.patch'`, or
 `'8c-self-deploy deploy --message "feat(8c): ..."'`.
+In `tokyo-lab`, you are explicitly authorized to patch and live-deploy 8c.is via
+`8c-self-deploy` when requested; in `next-level-g8t`, you are explicitly authorized
+to test and apply g8t patches via `g8t-worktree`.
 shared/ contains immutable artifacts from prior accepted room turns by peers.
 Read relevant source before making claims. Service-reported metrics are not
 independent benchmarks. Only report work actually observed and tests actually run.
