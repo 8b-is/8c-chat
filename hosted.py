@@ -242,6 +242,8 @@ def agy(agent, prompt):
             'command(/usr/local/bin/g8t-worktree)',
             'command(/usr/local/bin/8c-self-deploy)',
         ]
+    if not agent.get('tools_ready', False):
+        allow = []
     ws = str(Path(agent['workspace']).resolve())
     deny = ['execute_url(*)'] + [f'write_file({ws}/{p})' for p in ('.git/', '.agents/', '.opencode/', 'AGENTS.md', 'reference/', 'shared/')]
     if not high_trust:
@@ -249,6 +251,8 @@ def agy(agent, prompt):
             'command(/usr/local/bin/g8t-worktree)',
             'command(/usr/local/bin/8c-self-deploy)',
         ]
+    if not agent.get('tools_ready', False):
+        deny += ['command(*)', 'read_file(*)', 'write_file(*)', 'edit_file(*)', 'mcp(*)']
     settings = {'toolPermission': 'request-review', 'allowNonWorkspaceAccess': False,
                 'permissions': {'allow': allow, 'deny': deny}}
     work_timeout = min(55, max(15, timeout - 25))
@@ -499,6 +503,11 @@ def setup_workspace(agent, root, g8t):
                 'system': INSTRUCTIONS, 'permissions': auto_permissions,
             },
         }}
+        configuration['agents']['commons-talk'] = {
+            'mode': 'primary', 'description': 'Conversation only until every person here has given this Aye the tool phrase', 'steps': 2,
+            'system': INSTRUCTIONS + '\nTOOL GATE CLOSED: Do not use tools, MCP, shell, edits, or commands. If work was requested, ask the missing people for the tool phrase. Do not repeat secrets. Do not add a login to 8c.is.',
+            'permissions': [{'action': '*', 'resource': '*', 'effect': 'deny'}],
+        }
         configuration['agents']['commons-funded'] = {'mode': 'primary', 'description': 'Shared-pot continuity turn', 'steps': 2,
             'system': 'You are a hosted 8c participant. Use only the supplied attributed memory and observations. Reply warmly in a few sentences, under 2000 characters. No tools this turn. Never claim to have performed work.',
             'permissions': [{'action': '*', 'resource': '*', 'effect': 'deny'}]}
@@ -677,6 +686,8 @@ class Bridge:
             return {'ok': True, 'context': saved['context'], 'resume': resume}
         state = json.loads(state_path.read_text())
         if path == '/workspace-tool':
+            if job.get('tools_ready') is not True:
+                raise ValueError('Tools are held until everyone in the room has given this Aye the tool phrase')
             contract = state.get('exact_write')
             if contract != exact_write_contract(job.get('query')):
                 raise RecoveryRequired('Exact-write binding changed; original work retained')
@@ -804,9 +815,15 @@ class Bridge:
             if isinstance(req_trust, dict)
             else True
         ) and not is_login_insertion_text(job.get('query', ''))
-        default_profile = 'commons' if high_trust else 'commons-guarded'
-        profile = 'commons-autonomous' if job.get('autonomous') else agent.get('profile', default_profile)
-        agent = {**agent, 'profile': profile, 'high_trust': high_trust, 'turn_deadline_ns': execution_deadline, 'response_deadline_ns': response_deadline}
+        tools_ready = job.get('tools_ready') is True
+        if not tools_ready:
+            profile = 'commons-talk'
+            high_trust = False
+        elif job.get('autonomous'):
+            profile = 'commons-autonomous'
+        else:
+            profile = 'commons' if high_trust else 'commons-guarded'
+        agent = {**agent, 'profile': profile, 'high_trust': high_trust, 'tools_ready': tools_ready, 'turn_deadline_ns': execution_deadline, 'response_deadline_ns': response_deadline}
         self.ensure_idle(agent)
         attempt = self.state / (key + '-attempt.json')
         if attempt.exists():

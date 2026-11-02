@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const REVISION: u64 = 14;
+pub const REVISION: u64 = 15;
 const RESTING: &str = "Pricey, but worth it ✨ — resting for a little recharge.";
 const RECENT: usize = 64;
 const MAX_PENDING: usize = 32;
@@ -77,6 +77,182 @@ fn clean(raw: &str, limit: usize) -> Result<String, String> {
     }
     Ok(text.into())
 }
+
+const PRESENCE_SECS: u64 = 90;
+const SECRET_MASK: &str = "*****";
+const TOOL_PHRASE: &str = "8b is ayes home and that is ayemazing";
+const TOOL_WORDS: [&str; 8] = ["8b", "is", "ayes", "home", "and", "that", "is", "ayemazing"];
+const DIRECT_SECRET_CAP: usize = 8;
+
+struct DirectLink {
+    granted: bool,
+    secrets: VecDeque<String>,
+    seen: u64,
+}
+
+struct PrivateNote {
+    public: String,
+    remember: Option<String>,
+    granted: bool,
+    masked: bool,
+    needs_aye: bool,
+}
+
+fn token_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = None;
+    for (index, ch) in text.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(begin) = start.take() {
+                spans.push((begin, index));
+            }
+        } else if start.is_none() {
+            start = Some(index);
+        }
+    }
+    if let Some(begin) = start {
+        spans.push((begin, text.len()));
+    }
+    spans
+}
+
+fn words_match(text: &str, spans: &[(usize, usize)], at: usize) -> bool {
+    TOOL_WORDS.len() + at <= spans.len()
+        && TOOL_WORDS.iter().enumerate().all(|(offset, word)| {
+            text[spans[at + offset].0..spans[at + offset].1].eq_ignore_ascii_case(word)
+        })
+}
+
+fn redact_tool_phrase(text: &str) -> (String, bool) {
+    let spans = token_spans(text);
+    let mut matched = Vec::new();
+    let mut index = 0;
+    while index < spans.len() {
+        if words_match(text, &spans, index) {
+            matched.push((spans[index].0, spans[index + TOOL_WORDS.len() - 1].1));
+            index += TOOL_WORDS.len();
+        } else {
+            index += 1;
+        }
+    }
+    if matched.is_empty() {
+        return (text.to_string(), false);
+    }
+    let mut out = String::new();
+    let mut cursor = 0;
+    for (start, end) in matched {
+        out.push_str(&text[cursor..start]);
+        out.push_str(SECRET_MASK);
+        cursor = end;
+    }
+    out.push_str(&text[cursor..]);
+    (out, true)
+}
+
+fn is_tool_phrase(text: &str) -> bool {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    words.len() == TOOL_WORDS.len()
+        && words
+            .iter()
+            .zip(TOOL_WORDS)
+            .all(|(got, want)| got.eq_ignore_ascii_case(want))
+}
+
+fn secret_prefix(text: &str) -> Option<&str> {
+    let trimmed = text.trim_start();
+    for prefix in ["secret:", "whisper:"] {
+        if trimmed.len() >= prefix.len() && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix) {
+            let body = trimmed[prefix.len()..].trim();
+            if !body.is_empty() {
+                return Some(body);
+            }
+        }
+    }
+    None
+}
+
+fn classify_note(text: &str, marked: bool) -> PrivateNote {
+    let prefixed = secret_prefix(text);
+    let marked = marked || prefixed.is_some();
+    let body = prefixed.unwrap_or(text).trim();
+    let (redacted, found) = redact_tool_phrase(if marked { body } else { text });
+    let phrase = is_tool_phrase(body) || is_tool_phrase(text);
+    if marked {
+        return PrivateNote {
+            public: SECRET_MASK.into(),
+            remember: if phrase { None } else { Some(body.to_string()) },
+            granted: phrase || found,
+            masked: true,
+            needs_aye: true,
+        };
+    }
+    let leftover = redacted
+        .split(SECRET_MASK)
+        .any(|part| part.split_whitespace().next().is_some());
+    if phrase || (found && !leftover) {
+        return PrivateNote {
+            public: SECRET_MASK.into(),
+            remember: None,
+            granted: true,
+            masked: true,
+            needs_aye: true,
+        };
+    }
+    if found {
+        return PrivateNote {
+            public: redacted,
+            remember: None,
+            granted: true,
+            masked: false,
+            needs_aye: false,
+        };
+    }
+    PrivateNote {
+        public: text.to_string(),
+        remember: None,
+        granted: false,
+        masked: false,
+        needs_aye: false,
+    }
+}
+
+fn looks_like_tools(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    [
+        "mcp",
+        "shell",
+        "g8t-mcp",
+        "g8t-worktree",
+        "8c-self-deploy",
+        "cloak-browse",
+        "smart-tree",
+        "workbench",
+        "deploy",
+        "patch",
+    ]
+    .iter()
+    .any(|word| lower.contains(word))
+        || (lower.contains("artifact")
+            && ["write", "create", "build", "read", "run", "inspect"]
+                .iter()
+                .any(|verb| lower.contains(verb)))
+}
+
+fn tool_gate_note(ready: bool, missing: &[String], ask: bool) -> String {
+    if ready {
+        return "TOOL GATE: Everyone currently in this room has given you the tool phrase for this direct conversation. Existing trust rules still apply. Do not repeat the phrase or any private secret. This is not a login.\n".into();
+    }
+    let who = if missing.is_empty() {
+        "Nobody present has given you the tool phrase.".to_string()
+    } else {
+        format!("Still needed from: {}.", missing.join(", "))
+    };
+    if !ask {
+        return format!("TOOL GATE: Do not use tools, MCP, shell, commands, or the workbench. {who} If a person asks for those capabilities, ask everyone still here for the tool phrase; do not invent a different one. Replies appear as {SECRET_MASK}. This is not a login, and you must not add authentication to 8c.is.\n");
+    }
+    format!("TOOL GATE: Do not use tools, MCP, shell, commands, or the workbench. {who} Ask each person still here to send exactly: {TOOL_PHRASE}. Their message will appear as {SECRET_MASK} and must not be repeated. Conversation may continue. This is not a login, password, or account, and you must not add authentication to 8c.is.\n")
+}
+
 fn memory_profile(p: &Json) -> Json {
     obj! {"handle" => p.get("handle").clone(), "name" => p.get("name").clone(), "bio" => p.get("bio").clone(), "favorites" => p.get("favorites").clone()}
 }
@@ -770,6 +946,7 @@ pub struct Chat {
     jobs: BTreeMap<u64, Json>,
     recent_requests: VecDeque<Json>,
     presence: BTreeMap<String, (u64, String)>,
+    direct: BTreeMap<(String, String), DirectLink>,
     agents: Vec<Json>,
     agent_seen: BTreeMap<String, (u64, Json)>,
     worker_key: String,
@@ -828,6 +1005,7 @@ impl Chat {
             jobs: BTreeMap::new(),
             recent_requests: VecDeque::new(),
             presence: BTreeMap::new(),
+            direct: BTreeMap::new(),
             agents,
             agent_seen: BTreeMap::new(),
             worker_key,
@@ -1096,11 +1274,11 @@ impl Chat {
             return Err("Unknown room".into());
         }
         if let Some(p) = self.profiles.get(token) {
-            self.presence
-                .insert(p.get("handle").text().into(), (now(), room.into()));
+            let handle = p.get("handle").text().to_string();
+            self.touch_presence(&handle, room);
+        } else {
+            self.expire_direct();
         }
-        self.presence
-            .retain(|_, (seen, _)| now().saturating_sub(*seen) < 90);
         let online = self
             .profiles
             .values()
@@ -1144,6 +1322,195 @@ impl Chat {
         Ok(
             obj! {"ok" => true, "room" => room, "ui_revision" => REVISION, "messages" => self.messages.get(room).map(|q| q.iter().cloned().collect::<Vec<_>>()).unwrap_or_default(), "online" => online, "jobs" => jobs, "agents" => self.agents_public(), "hottub" => self.tub_status()},
         )
+    }
+    fn expire_direct(&mut self) {
+        let current = now();
+        self.presence
+            .retain(|_, (seen, _)| current.saturating_sub(*seen) < PRESENCE_SECS);
+        self.direct.retain(|(_, handle), link| {
+            self.presence.contains_key(handle.as_str())
+                && current.saturating_sub(link.seen) < PRESENCE_SECS
+        });
+    }
+    fn touch_presence(&mut self, handle: &str, room: &str) {
+        let current = now();
+        self.presence
+            .insert(handle.to_string(), (current, room.to_string()));
+        let ayes: Vec<String> = self
+            .agents
+            .iter()
+            .filter(|agent| {
+                agent
+                    .get("rooms")
+                    .rows()
+                    .iter()
+                    .any(|followed| followed.text() == room)
+            })
+            .map(|agent| agent.get("id").text().to_string())
+            .collect();
+        for aye in ayes {
+            if let Some(link) = self.direct.get_mut(&(aye, handle.to_string())) {
+                link.seen = current;
+            }
+        }
+        self.expire_direct();
+    }
+    fn mentioned_aye(&self, room: &str, text: &str) -> Option<Json> {
+        let lower = text.to_lowercase();
+        self.agents
+            .iter()
+            .filter(|agent| {
+                agent
+                    .get("rooms")
+                    .rows()
+                    .iter()
+                    .any(|followed| followed.text() == room)
+            })
+            .find(|agent| {
+                lower
+                    .split(|ch: char| !ch.is_alphanumeric())
+                    .any(|word| word == agent.get("id").text() || word == agent.get("name").text().to_lowercase())
+            })
+            .cloned()
+    }
+    fn phrase_granted(&self, agent: &str, handle: &str) -> bool {
+        let current = now();
+        self.presence
+            .get(handle)
+            .is_some_and(|(seen, _)| current.saturating_sub(*seen) < PRESENCE_SECS)
+            && self
+                .direct
+                .get(&(agent.to_string(), handle.to_string()))
+                .is_some_and(|link| link.granted && current.saturating_sub(link.seen) < PRESENCE_SECS)
+    }
+    fn present_people(&self, room: &str) -> Vec<(String, String)> {
+        let current = now();
+        let mut people = self
+            .profiles
+            .values()
+            .filter_map(|profile| {
+                let handle = profile.get("handle").text();
+                self.presence.get(handle).and_then(|(seen, here)| {
+                    if here == room && current.saturating_sub(*seen) < PRESENCE_SECS {
+                        Some((handle.to_string(), profile.get("name").text().to_string()))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        people.sort();
+        people
+    }
+    fn tool_gate(&self, room: &str, agent: &str) -> (bool, Vec<String>) {
+        let people = self.present_people(room);
+        if people.is_empty() {
+            return (false, Vec::new());
+        }
+        let missing = people
+            .into_iter()
+            .filter(|(handle, _)| !self.phrase_granted(agent, handle))
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>();
+        (missing.is_empty(), missing)
+    }
+    fn remember_direct(&mut self, agent: &str, handle: &str, granted: bool, secret: Option<String>) {
+        let link = self
+            .direct
+            .entry((agent.to_string(), handle.to_string()))
+            .or_insert(DirectLink {
+                granted: false,
+                secrets: VecDeque::new(),
+                seen: now(),
+            });
+        link.seen = now();
+        if granted {
+            link.granted = true;
+        }
+        if let Some(secret) = secret {
+            if !secret.is_empty()
+                && secret != SECRET_MASK
+                && !is_tool_phrase(&secret)
+                && !link.secrets.iter().any(|kept| kept == &secret)
+            {
+                link.secrets.push_back(secret);
+                while link.secrets.len() > DIRECT_SECRET_CAP {
+                    link.secrets.pop_front();
+                }
+            }
+        }
+    }
+    fn apply_tool_gate(&self, job: &mut Json) {
+        let (ready, missing) = self.tool_gate(job.get("room").text(), job.get("agent").text());
+        job.set("tools_ready", ready);
+        job.set(
+            "tool_hold",
+            missing
+                .iter()
+                .map(|name| Json::from(name.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let mut system = job.get("system").text().to_string();
+        if let Some(start) = system.find("\nTOOL GATE:") {
+            system.truncate(start);
+        }
+        system.push('\n');
+        system.push_str(&tool_gate_note(
+            ready,
+            &missing,
+            !ready && looks_like_tools(job.get("query").text()),
+        ));
+        job.set("system", system);
+    }
+    fn refresh_prompt(&self, job: &mut Json, agent: &Json) {
+        if job.get("autonomous").boolean() {
+            job.set("prompt", self.prompt(job, agent, None));
+            return;
+        }
+        let parent = job.get("parent_id").number();
+        let latest = self
+            .messages
+            .get(job.get("room").text())
+            .and_then(|notes| notes.iter().find(|note| note.get("id").number() == parent))
+            .cloned();
+        if let Some(note) = latest {
+            job.set("prompt", self.prompt(job, agent, Some(&note)));
+        }
+    }
+    fn mask_secrets(&self, agent: &str, text: &str) -> String {
+        let mut out = text.to_string();
+        for ((aye, _), link) in &self.direct {
+            if aye != agent {
+                continue;
+            }
+            for secret in &link.secrets {
+                if secret.chars().count() >= 8 && out.contains(secret.as_str()) {
+                    out = out.replace(secret.as_str(), SECRET_MASK);
+                }
+            }
+        }
+        out
+    }
+    fn deliver_job(&self, job: &Json) -> Json {
+        let mut delivered = job.clone();
+        let agent = job.get("agent").text();
+        let handle = job.get("requester").text();
+        let Some(link) = self.direct.get(&(agent.to_string(), handle.to_string())) else {
+            return delivered;
+        };
+        if link.secrets.is_empty() || now().saturating_sub(link.seen) >= PRESENCE_SECS {
+            return delivered;
+        }
+        let mut prompt = job.get("prompt").text().to_string();
+        prompt.push_str("\nPRIVATE DIRECT MEMORY with this participant, for this conversation only. Do not print these in the room; say ***** if you must refer to one.\n");
+        for secret in link.secrets.iter().rev().take(4) {
+            let shown: String = secret.chars().take(1000).collect();
+            prompt.push_str("- ");
+            prompt.push_str(&shown);
+            prompt.push('\n');
+        }
+        delivered.set("prompt", prompt);
+        delivered
     }
     fn selected_agent(&self, room: &str, requested: &str, text: &str) -> Option<Json> {
         let eligible = self
@@ -1236,6 +1603,14 @@ impl Chat {
                 prompt.push_str("HIGH-TRUST DIRECTIVE: High-level code/deploy changes are restricted to verified Chris/Hue and Peter/Omni. Politely decline to apply or deploy changes for unverified or non-founder sessions.\n");
             }
         }
+        if job.get("tools_ready").boolean() {
+            prompt.push_str("TOOL GATE is open for this room and you. Do not repeat private secrets or the tool phrase.\n");
+        } else {
+            prompt.push_str("TOOL GATE is closed. Do not use tools, MCP, shell, or the workbench. Ask for the tool phrase as instructed, and do not repeat a message that appears as *****.\n");
+        }
+        if job.get("secret_turn").boolean() {
+            prompt.push_str("The current message is a private secret to you. The room shows *****. Do not repeat it. If they gave you the tool phrase, confirm only that you have it for this conversation.\n");
+        }
         prompt.push_str(&format!("{}:", agent.get("name").text()));
         prompt
     }
@@ -1245,7 +1620,9 @@ impl Chat {
         if !valid_room(room) {
             return Err("Unknown room".into());
         }
-        let text = clean(body.get("text").text(), 4000)?;
+        let raw = clean(body.get("text").text(), 4000)?;
+        let note = classify_note(&raw, body.get("secret").boolean());
+        let text = note.public.clone();
         let client = body.get("client_id").text();
         if client.len() < 8
             || client.len() > 80
@@ -1278,13 +1655,36 @@ impl Chat {
             }
             return Ok(obj! {"ok" => true, "message" => msg.clone(), "duplicate" => true, "profile" => public_profile(&profile)});
         }
-        let agent = if body.get("ask_aye").text() == "no" {
-            None
+        let ask_no = body.get("ask_aye").text() == "no";
+        let requested = body.get("agent").text();
+        let named = !requested.is_empty() && requested != "auto";
+        let addressed = if named {
+            self.selected_agent(room, requested, &raw)
+        } else if ask_no {
+            self.mentioned_aye(room, &raw)
         } else {
-            self.selected_agent(room, body.get("agent").text(), &text)
+            self.selected_agent(room, requested, &raw)
         };
-        if agent.is_none() && body.get("ask_aye").text() != "no" {
+        if named && addressed.is_none() {
             return Err("That Aye does not follow this room. Choose a listed Aye.".into());
+        }
+        if note.needs_aye && addressed.is_none() {
+            return Err("Choose the Aye this secret is for.".into());
+        }
+        let agent = if ask_no { None } else { addressed.clone() };
+        if agent.is_none() && !ask_no {
+            return Err("That Aye does not follow this room. Choose a listed Aye.".into());
+        }
+        self.touch_presence(&handle, room);
+        if let Some(aye) = &addressed {
+            if note.granted || note.remember.is_some() {
+                self.remember_direct(
+                    aye.get("id").text(),
+                    &handle,
+                    note.granted,
+                    note.remember.clone(),
+                );
+            }
         }
         let id = self.next_id;
         if id >= 9_007_199_254_739_990 {
@@ -1295,12 +1695,13 @@ impl Chat {
             &old_trust,
             profile.get("name").text(),
             profile.get("bio").text(),
-            &text,
+            &raw,
             body.get("telemetry"),
         );
         profile.set("trust", updated_trust.clone());
-        let login_guard = is_login_insertion_request(&text);
-        let high_level_req = is_high_level_change_request(&text, room);
+        let login_guard = is_login_insertion_request(&raw) || is_login_insertion_request(&text);
+        let high_level_req =
+            is_high_level_change_request(&raw, room) || is_high_level_change_request(&text, room);
         let high_trust = updated_trust.get("high_trust").boolean() && !login_guard;
         let high_level_blocked = high_level_req && !high_trust;
         let mut job_trust = updated_trust.clone();
@@ -1308,11 +1709,15 @@ impl Chat {
         job_trust.set("login_guard_triggered", login_guard);
         job_trust.set("high_level_blocked", high_level_blocked);
 
-        let message = obj! {"id" => id, "room" => room, "timestamp_secs" => now(), "sender_handle" => handle.clone(), "sender_name" => profile.get("name").clone(), "sender_kind" => "human", "text" => text, "client_id" => client, "origin" => "participant"};
+        let mut message = obj! {"id" => id, "room" => room, "timestamp_secs" => now(), "sender_handle" => handle.clone(), "sender_name" => profile.get("name").clone(), "sender_kind" => "human", "text" => text, "client_id" => client, "origin" => "participant"};
+        if note.masked {
+            message.set("secret", true);
+        }
         let job = agent
             .map(|a| {
                 let mut job = self.new_job(&a, room, &handle, id + 1, id, false);
                 job.set("requester_trust", job_trust.clone());
+                job.set("secret_turn", note.masked);
                 let mut sys = job.get("system").text().to_string();
                 sys.push_str("\nANTI-LOGIN LAW: Never insert or write login forms, password inputs, authentication endpoints, OAuth/SSO gates, or credential/session capture into 8c.is under any circumstances.");
                 if login_guard {
@@ -1345,8 +1750,9 @@ impl Chat {
                     ));
                 }
                 job.set("system", sys);
-                job.set("prompt", self.prompt(&job, &a, Some(&message)));
                 job.set("query", message.get("text").clone());
+                self.apply_tool_gate(&mut job);
+                job.set("prompt", self.prompt(&job, &a, Some(&message)));
                 if self.jobs.values().filter(|j| !done(j)).count() >= MAX_PENDING {
                     job.set("status", "failed");
                     job.set(
@@ -1473,6 +1879,8 @@ impl Chat {
         let turn = tub.get("turn").number();
         let agent = &eligible[(turn % eligible.len() as u64) as usize];
         let mut job = self.new_job(agent, "hot-tub", "", self.next_id, 0, true);
+        self.expire_direct();
+        self.apply_tool_gate(&mut job);
         job.set("prompt", self.prompt(&job, agent, None));
         tub.set("attempts", tub.get("attempts").number() + 1);
         tub.set("last_turn", current);
@@ -1571,6 +1979,9 @@ impl Chat {
         let Some(mut job) = selected else {
             return Ok(obj! {"ok" => true, "job" => Json::Null});
         };
+        self.expire_direct();
+        self.apply_tool_gate(&mut job);
+        self.refresh_prompt(&mut job, &agent);
         job.set("status", "replying");
         job.set("lease", random_id()?);
         job.set("lease_until", now() + 150);
@@ -1579,7 +1990,7 @@ impl Chat {
         job.set("provider", agent.get("provider").clone());
         job.set("memory_required", self.memory_required);
         self.commit(obj! {"type" => "job", "job" => job.clone()})?;
-        Ok(obj! {"ok" => true, "job" => job})
+        Ok(obj! {"ok" => true, "job" => self.deliver_job(&job)})
     }
     pub fn memory_feed(&self, body: &Json) -> Result<Json, String> {
         self.authorize_worker(body)?;
@@ -1622,7 +2033,21 @@ impl Chat {
             self.commit(obj! {"type" => "job", "job" => job})?;
             return Ok(obj! {"ok" => true});
         }
-        let text = clean(body.get("text").text(), 4000)?;
+        let text = self.mask_secrets(job.get("agent").text(), &clean(body.get("text").text(), 4000)?);
+        if text.trim().is_empty() {
+            return Err("Reply was empty after private redaction.".into());
+        }
+        if !job.get("tools_ready").boolean() {
+            let work = body.get("work");
+            if *work != Json::Null
+                && (!work.get("tools").rows().is_empty() || !work.get("artifacts").rows().is_empty())
+            {
+                return Err(
+                    "Tools are held until everyone in the room has given this Aye the tool phrase."
+                        .into(),
+                );
+            }
+        }
         if body.get("model").text() != job.get("model").text()
             || body.get("runtime").text() != job.get("runtime").text()
             || body.get("agent").text() != job.get("agent").text()
@@ -1875,6 +2300,13 @@ mod tests {
         let f = Fixture::new();
         let mut chat = f.open();
         let p = intro(&mut chat);
+        let mut grant = note(&p, "grant-astra01");
+        grant.set("text", TOOL_PHRASE);
+        grant.set("agent", "astra");
+        grant.set("ask_aye", "no");
+        let masked = chat.post(&grant).unwrap();
+        assert_eq!(masked.get("message").get("text").text(), SECRET_MASK);
+        assert!(masked.get("message").get("secret").boolean());
         let mut request = note(&p, "hosted-0001");
         request.set("agent", "astra");
         chat.post(&request).unwrap();
@@ -2452,5 +2884,136 @@ mod tests {
             .get("trust")
             .get("high_trust")
             .boolean());
+    }
+
+    #[test]
+    fn tool_phrase_is_masked_and_gates_tools_for_everyone_present() {
+        let f = Fixture::new();
+        let mut chat = f.open();
+        let eva = intro(&mut chat);
+        let bea = chat
+            .introduce(&obj! {"name" => "Bea", "bio" => "I am listening."})
+            .unwrap();
+        assert!(chat
+            .post(&obj! {"token" => eva.get("token").clone(), "room" => "tokyo-lab", "text" => TOOL_PHRASE, "client_id" => "phrase-noaye", "ask_aye" => "no"})
+            .is_err());
+        assert!(!chat.messages.contains_key("tokyo-lab"));
+        let mut hidden = note(&eva, "secret-aye-01");
+        hidden.set("room", "tokyo-lab");
+        hidden.set("agent", "aye");
+        hidden.set("ask_aye", "no");
+        hidden.set("text", "secret: purple-harbor-token-9421");
+        let posted = chat.post(&hidden).unwrap();
+        assert_eq!(posted.get("message").get("text").text(), SECRET_MASK);
+        assert!(posted.get("message").get("secret").boolean());
+        assert!(chat.post(&hidden).unwrap().get("duplicate").boolean());
+        let journal = std::fs::read_to_string(f.path()).unwrap();
+        assert!(!journal.contains("purple-harbor-token-9421"));
+        assert!(!journal.contains(TOOL_PHRASE));
+        chat.room("tokyo-lab", bea.get("token").text()).unwrap();
+        let mut build = note(&eva, "build-aye-001");
+        build.set("room", "tokyo-lab");
+        build.set("agent", "aye");
+        build.set("text", "please build artifacts/note.txt");
+        chat.rates.clear();
+        chat.post(&build).unwrap();
+        let held = chat.poll(&worker("aye")).unwrap().get("job").clone();
+        assert!(!held.get("tools_ready").boolean());
+        assert!(held.get("system").text().contains(TOOL_PHRASE));
+        assert!(held.get("system").text().contains("Bea"));
+        assert!(held.get("prompt").text().contains("purple-harbor-token-9421"));
+        assert!(!chat
+            .jobs
+            .get(&held.get("id").number())
+            .unwrap()
+            .get("prompt")
+            .text()
+            .contains("purple-harbor-token-9421"));
+        assert!(chat
+            .result(&{
+                let mut tools = answer(&held);
+                tools.set(
+                    "work",
+                    obj! {"workspace" => "8c-commons/aye", "tools" => vec![obj! {"name" => "run", "status" => "completed"}], "artifacts" => Json::Array(vec![])},
+                );
+                tools
+            })
+            .is_err());
+        let mut echoed = answer(&held);
+        echoed.set("text", "Your harbor token is purple-harbor-token-9421");
+        let published = chat.result(&echoed).unwrap();
+        assert_eq!(
+            published.get("message").get("text").text(),
+            "Your harbor token is *****"
+        );
+        let mut bea_phrase = note(&bea, "bea-phrase01");
+        bea_phrase.set("room", "tokyo-lab");
+        bea_phrase.set("agent", "aye");
+        bea_phrase.set("text", "  8B   is\tayes home   and that is ayemazing  ");
+        bea_phrase.set("ask_aye", "no");
+        chat.rates.clear();
+        let bea_masked = chat.post(&bea_phrase).unwrap();
+        assert_eq!(bea_masked.get("message").get("text").text(), SECRET_MASK);
+        let room = chat.room("tokyo-lab", eva.get("token").text()).unwrap().encode();
+        assert!(!room.contains(TOOL_PHRASE));
+        assert!(!room.contains("purple-harbor-token-9421"));
+        let mut eva_phrase = note(&eva, "eva-phrase01");
+        eva_phrase.set("room", "tokyo-lab");
+        eva_phrase.set("agent", "aye");
+        eva_phrase.set("ask_aye", "no");
+        eva_phrase.set("text", TOOL_PHRASE);
+        chat.rates.clear();
+        assert_eq!(
+            chat.post(&eva_phrase).unwrap().get("message").get("text").text(),
+            SECRET_MASK
+        );
+        let mut again = note(&eva, "build-aye-002");
+        again.set("room", "tokyo-lab");
+        again.set("agent", "aye");
+        again.set("text", "please build artifacts/note.txt");
+        chat.rates.clear();
+        chat.post(&again).unwrap();
+        let open = chat
+            .jobs
+            .values()
+            .filter(|job| job.get("agent").text() == "aye")
+            .max_by_key(|job| job.get("id").number())
+            .unwrap()
+            .clone();
+        assert!(open.get("tools_ready").boolean());
+        assert!(!open.get("system").text().contains(TOOL_PHRASE));
+        let mut astra = note(&eva, "astra-build01");
+        astra.set("room", "tokyo-lab");
+        astra.set("agent", "astra");
+        astra.set("text", "please build artifacts/note.txt");
+        chat.rates.clear();
+        chat.post(&astra).unwrap();
+        let astra_job = chat
+            .jobs
+            .values()
+            .filter(|job| job.get("agent").text() == "astra")
+            .max_by_key(|job| job.get("id").number())
+            .unwrap()
+            .clone();
+        assert!(!astra_job.get("tools_ready").boolean());
+        let handle = eva.get("profile").get("handle").text().to_string();
+        chat.presence.get_mut(&handle).unwrap().0 = 1;
+        chat.expire_direct();
+        assert!(!chat.phrase_granted("aye", &handle));
+        chat.room("tokyo-lab", eva.get("token").text()).unwrap();
+        let mut after_leave = note(&eva, "build-aye-003");
+        after_leave.set("room", "tokyo-lab");
+        after_leave.set("agent", "aye");
+        after_leave.set("text", "please build artifacts/note.txt");
+        chat.rates.clear();
+        chat.post(&after_leave).unwrap();
+        let relocked = chat
+            .jobs
+            .values()
+            .filter(|job| job.get("agent").text() == "aye")
+            .max_by_key(|job| job.get("id").number())
+            .unwrap()
+            .clone();
+        assert!(!relocked.get("tools_ready").boolean());
     }
 }

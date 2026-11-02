@@ -10,6 +10,13 @@ import worker
 
 
 class WorkerTests(unittest.TestCase):
+    def test_tools_stay_closed_unless_the_server_boolean_is_true(self):
+        self.assertFalse(worker.tools_allowed({}))
+        self.assertFalse(worker.tools_allowed({"tools_ready": "true"}))
+        self.assertFalse(worker.tools_allowed({"tools_ready": 1}))
+        self.assertFalse(worker.tools_allowed({"tools_ready": False}))
+        self.assertTrue(worker.tools_allowed({"tools_ready": True}))
+
     def test_inference_boundary_rejects_dns_proxies_redirects_and_cloud(self):
         for url in ["http://localhost:11434", "https://example.com", "http://127.0.0.1.evil/", "http://127.0.0.1@elsewhere/", "http://127.0.0.1/path", "http://127.1", "http://2130706433", "http://0.0.0.0", "http://127.0.0.1?next=x"]:
             with self.assertRaises(ValueError): worker.endpoint(url, inference=True)
@@ -195,7 +202,7 @@ class WorkerTests(unittest.TestCase):
                'endpoint':'http://127.0.0.1:11435','workbench':'http://127.0.0.1:8799'}
         job={'id':1,'agent':'cheet','runtime':'ollama','model':agent['model'],'digest':'a'*64,
              'system':'Answer the current visitor.','prompt':'Use the write tool to create artifacts/hello.txt.',
-             'query':'Use the write tool to create artifacts/hello.txt.'}
+             'query':'Use the write tool to create artifacts/hello.txt.','tools_ready':True}
         for response in ['{"tool":"run","command":"unfinished', '[]', '{"tool":"write","text":"missing path"}',
                          '{"tool":"say","text":"I created artifacts/hello.txt."}']:
             with self.subTest(response=response), patch.object(worker,'inventory',return_value='a'*64), \

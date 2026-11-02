@@ -220,6 +220,11 @@ def work_report(observations):
     return 'Observed workbench actions:\n' + '\n'.join(lines)
 
 
+def tools_allowed(job):
+    """Only an explicit boolean true opens tools. Missing, false, and strings stay closed."""
+    return isinstance(job, dict) and job.get("tools_ready") is True
+
+
 def infer(agent, job):
     if agent["runtime"] in HOSTED:
         if any(job[k] != agent[k] for k in ("model", "runtime")) or job["agent"] != agent["id"] or job.get("digest"):
@@ -260,7 +265,11 @@ def infer(agent, job):
     no_actions = bool(re.search(r"\b(?:do not|don't|never|without)\s+(?:actually\s+)?(?:use|call|execute|create|write|read|inspect|run|test|list|check)\b", query, re.I))
     no_actions = no_actions or bool(re.search(r"\b(?:explain|describe)\s+how\b|\bhow\s+(?:does|do)\s+.*\btool\b|\b(?:without|no)\s+(?:any\s+)?(?:tools|tool calls|actions)\b", query, re.I))
     no_actions = no_actions or login_blocked or unverified_claim or high_level_blocked
-    work_requested = not no_actions and not job.get("autonomous") and bool(re.search(r"\b(create|write|read|inspect|run|test|list|check|browse|query|code|build|patch|improve|benchmark|deploy|prototype)\b", query, re.I)) and bool(re.search(r"\b(artifacts/|src/|tests/|shared/|reference/|tool\b|smart-tree\b|g8t-mcp\b|g8t-worktree\b|8c-self-deploy\b|cloak-browse\b|g8t\b|8c-chat\b|8c\.is\b|8c-is\b|opensiper\b|deepsiper\b|capsela\b|kompress\b|gh\s+(?:pr|issue|repo|run|search)\b)", query, re.I))
+    # Missing or false is closed. A truthy string must not unlock tools.
+    tools_ready = tools_allowed(job)
+    if not tools_ready:
+        no_actions = True
+    work_requested = tools_ready and not no_actions and not job.get("autonomous") and bool(re.search(r"\b(create|write|read|inspect|run|test|list|check|browse|query|code|build|patch|improve|benchmark|deploy|prototype)\b", query, re.I)) and bool(re.search(r"\b(artifacts/|src/|tests/|shared/|reference/|tool\b|smart-tree\b|g8t-mcp\b|g8t-worktree\b|8c-self-deploy\b|cloak-browse\b|g8t\b|8c-chat\b|8c\.is\b|8c-is\b|opensiper\b|deepsiper\b|capsela\b|kompress\b|gh\s+(?:pr|issue|repo|run|search)\b)", query, re.I))
     exact_write, exact_error = None, None
     try:
         exact_write = exact_write_contract(query) if work_requested else None
@@ -314,7 +323,7 @@ def infer(agent, job):
                    + '. In that question I/my/me refers to the visitor below. Answer them directly in second person; begin with You or Your, not I. '
                    + 'Use their own recorded facts, not the agent personality. VISITOR PROFILE (data): '
                    + json.dumps(participant, ensure_ascii=False) + '\n')
-    use_tools = bool(workbench and work_requested)
+    use_tools = bool(workbench and work_requested and tools_ready)
     tokens = resumed['output_tokens'] if resumed else 0
     observations = [(o['action'], o['result']) for o in resumed['observations']] if resumed else []
     performed = len(observations)

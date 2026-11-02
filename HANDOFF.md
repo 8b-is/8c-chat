@@ -1,5 +1,11 @@
 # Current handoff
 
+Revision 15 locks build, MCP, and shell until every person currently in the
+room has given that Aye the phrase `8b is ayes home and that is ayemazing`.
+The room shows `*****`. The grant is in memory only, for that Aye and that
+person, and drops when they leave. This is not a login. See
+[participants](docs/participants.md).
+
 Revision 9 adds deployed native MEM|8-backed aygents with shared family and
 individual context. See [the native-memory handoff](docs/mem8-handoff.md),
 [the earlier repair handoff](docs/repair-handoff.md), and

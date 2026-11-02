@@ -34,6 +34,7 @@
   let initialized = false;
   let tubRunning = true;
   let identityBusy = false;
+  let secretNext = false;
   const sending = new Set();
   const keyDownAt = new Map();
   let dwellSum = 0n, dwellCount = 0n, flightSum = 0n, flightCount = 0n, jitterSum = 0n, lastUpAt = 0n, keystrokes = 0n, pasteEvents = 0n;
@@ -542,6 +543,12 @@
     const name = document.createElement("strong"); name.textContent = note.sender_name;
     const time = document.createElement("time"); time.textContent = timeLabel(note.timestamp_secs);
     head.append(name, time);
+    if (note.secret) {
+      const priv = document.createElement("span");
+      priv.className = "quiet";
+      priv.textContent = "private to this Aye";
+      head.append(priv);
+    }
     const text = renderMarkdown(note.text);
     node.append(head, text);
     if (["local-worker", "hosted-worker"].includes(note.origin)) {
@@ -674,12 +681,21 @@
       const target = agents.find(a => a.rooms?.includes(selected) && (a.id.toLowerCase() === mention[1].toLowerCase() || a.name.toLowerCase() === mention[1].toLowerCase()));
       if (target) { mode = target.id; if (selected === room && el("ayeMode")) el("ayeMode").value = mode; }
     }
+    if (secretNext && mode === "no") {
+      draft(selected).error = "Choose the Aye this secret is for. Your draft is kept.";
+      if (selected === room) refreshComposer();
+      return;
+    }
     if (d.submitted !== text || !d.id) { d.id = crypto.randomUUID(); d.submitted = text; }
     const id = d.id;
     d.error = ""; saveDrafts(); sending.add(selected);
     if (selected === room) refreshComposer();
     try {
-      const res = await api("/api/messages", {room: selected, text, client_id: id, agent: mode === "no" ? "auto" : mode, ask_aye: mode === "no" ? "no" : "always", telemetry: snapshotTelemetry()});
+      const body = {room: selected, text, client_id: id, agent: mode === "no" ? "auto" : mode, ask_aye: mode === "no" ? "no" : "always", telemetry: snapshotTelemetry()};
+      if (secretNext) body.secret = true;
+      const res = await api("/api/messages", body);
+      secretNext = false;
+      if (el("secretBtn")) { el("secretBtn").setAttribute("aria-pressed", "false"); el("secretBtn").textContent = "Secret"; }
       if (res.profile) { profile = res.profile; identityLabels(); }
       resetTelemetry();
       const current = draft(selected);
@@ -745,6 +761,12 @@
       const target = agents.find(a => a.rooms?.includes(room) && (a.id.toLowerCase() === mention[1].toLowerCase() || a.name.toLowerCase() === mention[1].toLowerCase()));
       if (target) el("ayeMode").value = target.id;
     }
+  });
+  el("secretBtn").addEventListener("click", () => {
+    secretNext = !secretNext;
+    el("secretBtn").setAttribute("aria-pressed", secretNext ? "true" : "false");
+    el("secretBtn").textContent = secretNext ? "Secret on" : "Secret";
+    el("msgInput").focus();
   });
   el("chatForm").addEventListener("submit", event => { event.preventDefault(); send(); });
   el("msgInput").addEventListener("keydown", event => { recordKeyDown(event); if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); send(); } });

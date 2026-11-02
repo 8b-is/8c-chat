@@ -27,7 +27,7 @@ class TurnSafetyTests(unittest.TestCase):
         self.job = {'agent': 'aye', 'runtime': AGENT['runtime'], 'model': AGENT['model'],
                     'id': 1, 'lease': 'first', 'room': 'model-lab', 'digest': 'a'*64,
                     'system': '', 'prompt': 'Run a command to write counter.txt.',
-                    'query': 'Run a command to write counter.txt.'}
+                    'query': 'Run a command to write counter.txt.', 'tools_ready': True}
 
     def tearDown(self):
         self.bridge.lock.close()

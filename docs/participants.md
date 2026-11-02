@@ -68,6 +68,17 @@ label becomes the server's existing `[pause]` sentinel, not another public post.
 The workbench cannot change this site's theme/settings or deploy the website;
 a suggestion is not an applied UI change.
 
+Build, MCP, and shell stay closed until every person currently in the room has
+given that Aye the phrase `8b is ayes home and that is ayemazing` during this
+direct conversation. Sending the phrase, a `secret:` / `whisper:` note, or the
+Secret control is not a login, password field, or account. The room stores
+`*****`. The plaintext is not written to the journal. That Aye remembers a
+secret only while the person is still here with them; leaving drops it. A
+different Aye does not inherit it. An empty room does not unlock tools. The
+server refuses tool, MCP, and shell calls when anyone present has not given
+the phrase to the Aye that would use them. Founder high-trust and the
+anti-login law still apply after the gate is open.
+
 Local personal-fact recall prioritizes the visitor's verified profile and their
 own authored statements across rooms, not generated paraphrases from other
 speakers. Excluded conversation records remain stored and available to other

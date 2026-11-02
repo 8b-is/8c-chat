@@ -26,7 +26,8 @@ class LocalWorkReportingTests(unittest.TestCase):
     def infer(self, query, responses, history='', participant=None):
         job = {'id':1, 'lease':'reporting', 'room':'model-lab', 'agent':'cheet',
                'runtime':'ollama', 'model':self.agent['model'], 'digest':'a'*64,
-               'system':'Answer the current visitor.', 'prompt':history+(query or ''), 'query':query}
+               'system':'Answer the current visitor.', 'prompt':history+(query or ''), 'query':query,
+               'tools_ready':True}
         if participant is not None:
             job['participant'] = participant
         sequence = iter(responses)

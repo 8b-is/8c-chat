@@ -44,11 +44,29 @@ class CommonsTests(unittest.TestCase):
         self.assertFalse(hosted.budget_error({'error': 'file not found'}))
         self.assertIn('Pricey, but worth it', hosted.RESTING)
 
+    def test_workspace_tool_stays_closed_without_an_explicit_room_grant(self):
+        with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory:
+            agent = {'id':'aye', 'name':'Aye', 'runtime':'ollama', 'model':'aye:latest'}
+            bridge = hosted.Bridge({'agents':[agent]}, directory)
+            job = {'id':1, 'lease':'held', 'room':'tokyo-lab'}
+            body = {**agent, 'agent':'aye', 'job':job}
+            try:
+                with patch.object(hosted, 'request', return_value={}):
+                    bridge.handle('/workspace-start', body)
+                job.update(work_deadline_ns=time.monotonic_ns()+60_000_000_000, sequence=0, action={'tool':'run', 'command':'printf x'})
+                with self.assertRaisesRegex(ValueError, 'tool phrase'):
+                    bridge.handle('/workspace-tool', body)
+                job['tools_ready'] = 'true'
+                with self.assertRaisesRegex(ValueError, 'tool phrase'):
+                    bridge.handle('/workspace-tool', body)
+            finally:
+                bridge.lock.close()
+
     def test_local_tool_replay_does_not_repeat_a_command(self):
         with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory:
             agent = {'id':'aye', 'name':'Aye', 'runtime':'ollama', 'model':'aye:latest'}
             bridge = hosted.Bridge({'agents':[agent]}, directory)
-            job = {'id':1, 'lease':'local-test', 'room':'tokyo-lab'}
+            job = {'id':1, 'lease':'local-test', 'room':'tokyo-lab', 'tools_ready':True}
             body = {**agent, 'agent':'aye', 'job':job}
             try:
                 with patch.object(hosted,'request',return_value={'total_capsules':5}):
@@ -66,7 +84,7 @@ class CommonsTests(unittest.TestCase):
             agent = {'id':'aye', 'name':'Aye', 'runtime':'ollama', 'model':'aye:latest',
                      'endpoint':'http://127.0.0.1:11435', 'workbench':'http://127.0.0.1:8799'}
             bridge = hosted.Bridge({'agents':[agent]}, directory)
-            job = {'id':1, 'lease':'finalized', 'room':'tokyo-lab', 'agent':'aye',
+            job = {'id':1, 'lease':'finalized', 'room':'tokyo-lab', 'agent':'aye', 'tools_ready':True,
                    'runtime':'ollama', 'model':agent['model'], 'digest':'a'*64,
                    'system':'', 'prompt':'Write artifacts/first.txt.'}
             body = {'agent':'aye', 'runtime':'ollama', 'model':agent['model'], 'job':job}
@@ -106,7 +124,7 @@ class CommonsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory:
             agent = {'id':'aye', 'name':'Aye', 'runtime':'ollama', 'model':'aye:latest'}
             bridge = hosted.Bridge({'agents':[agent]}, directory)
-            job = {'id':1, 'lease':'uncertain', 'room':'tokyo-lab'}
+            job = {'id':1, 'lease':'uncertain', 'room':'tokyo-lab', 'tools_ready':True}
             body = {'agent':'aye', 'runtime':'ollama', 'model':agent['model'], 'job':job}
             try:
                 with patch.object(hosted, 'request', return_value={}):
@@ -127,7 +145,7 @@ class CommonsTests(unittest.TestCase):
             agent = {'id':'cheet', 'name':'Cheet', 'runtime':'ollama', 'model':'local:latest',
                      'endpoint':'http://127.0.0.1:11435', 'workbench':'http://127.0.0.1:8799'}
             bridge = hosted.Bridge({'agents':[agent]}, directory)
-            job = {'id':1, 'lease':'corrected', 'room':'model-lab', 'agent':'cheet', 'runtime':'ollama',
+            job = {'id':1, 'lease':'corrected', 'room':'model-lab', 'agent':'cheet', 'runtime':'ollama', 'tools_ready':True,
                    'model':agent['model'], 'digest':'a'*64, 'system':'Answer the current visitor.',
                    'prompt':'Use the write tool to create artifacts/marker.txt with copper lighthouse.',
                    'query':'Use the write tool to create artifacts/marker.txt with copper lighthouse.'}

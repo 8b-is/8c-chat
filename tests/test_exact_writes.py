@@ -22,7 +22,7 @@ class ExactWriteTests(unittest.TestCase):
         self.query = 'Use your write tool to create '+self.target+' containing exactly '+self.literal+'. Briefly tell us what you did.'
         self.job = {'agent':'cheet','runtime':'ollama','model':self.agent['model'],'digest':'a'*64,
                     'id':1,'lease':'first','room':'model-lab','system':'Answer the current visitor.',
-                    'query':self.query,'prompt':self.query}
+                    'query':self.query,'prompt':self.query,'tools_ready':True}
         self.paths, self.payloads = [], []
 
     def tearDown(self):
