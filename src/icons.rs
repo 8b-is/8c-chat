@@ -31,12 +31,17 @@ fn icon_pixel(x: i32, y: i32, size: i32) -> [u8; 4] {
     let dx = x - size / 2;
     let dy = y - size / 2;
     let d2 = dx * dx + dy * dy;
-    let core = (size / 10) * (size / 10);
-    let inner = (size * 18 / 64) * (size * 18 / 64);
-    let outer = (size * 24 / 64) * (size * 24 / 64);
-    if d2 <= core.max(4) {
+    // Use exact integer scaling for radii to avoid precision loss
+    // core: radius ~ size/10 -> d2 <= (size/10)^2
+    // inner: radius ~ size*18/64 -> d2 >= (size*18/64)^2
+    // outer: radius ~ size*24/64 -> d2 <= (size*24/64)^2
+    let core_r2 = (size / 10) * (size / 10);
+    let inner_r2 = (size * 18 / 64) * (size * 18 / 64);
+    let outer_r2 = (size * 24 / 64) * (size * 24 / 64);
+    
+    if d2 <= core_r2.max(4) {
         [0xe8, 0xb0, 0x5c, 255]
-    } else if d2 >= inner && d2 <= outer {
+    } else if d2 >= inner_r2 && d2 <= outer_r2 {
         [0x62, 0xe6, 0xc9, 255]
     } else {
         [0x05, 0x06, 0x0a, 255]
