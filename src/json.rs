@@ -31,6 +31,22 @@ impl Json {
             0
         }
     }
+    pub fn number_rational(&self) -> Option<(i64, u64)> {
+        if let Self::Number(s) = self {
+            if let Ok(i) = s.parse::<i64>() {
+                return Some((i, 1));
+            }
+            if let Some(pos) = s.find('/') {
+                let (p_str, q_str) = s.split_at(pos);
+                let p = p_str.parse::<i64>().ok()?;
+                let q = q_str[1..].parse::<u64>().ok()?;
+                if q != 0 {
+                    return Some((p, q));
+                }
+            }
+        }
+        None
+    }
     pub fn boolean(&self) -> bool {
         matches!(self, Self::Bool(true))
     }
