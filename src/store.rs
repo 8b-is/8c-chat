@@ -32,13 +32,12 @@ impl Store {
         file.try_lock()
             .map_err(|e| format!("Journal already owned or unavailable: {e}"))?;
         file.sync_all().map_err(|e| e.to_string())?;
-        File::open(
-            path.parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or(Path::new(".")),
-        )
-        .and_then(|f| f.sync_all())
-        .map_err(|e| e.to_string())?;
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            File::open(parent)
+                .and_then(|f| f.sync_all())
+                .map_err(|e| e.to_string())?;
+        }
+        File::open(".").and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
         {
             let mut reader = BufReader::new(&file);
             let mut count = 0u64;
