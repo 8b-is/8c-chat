@@ -94,6 +94,9 @@ impl Store {
         if source.len() != 48 || !source.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err("Invalid memory source identity; original retained".into());
         }
+        // Ensure the source string is treated as a fixed-size identity
+        let mut source_bytes = [0u8; 48];
+        source_bytes.copy_from_slice(source.as_bytes());
         Ok(Self {
             file,
             poisoned: Cell::new(false),
