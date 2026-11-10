@@ -49,6 +49,8 @@ fn run() -> Result<(), String> {
                 eprintln!("scheduler: {error}");
             }
         }
+        // Drop the lock explicitly before sleeping to avoid holding it across the sleep duration
+        // if the lock guard were somehow held by the loop scope, though here it is dropped at end of if-let.
     });
     let (tx, rx) = mpsc::sync_channel::<std::net::TcpStream>(32);
     let rx = Arc::new(Mutex::new(rx));
