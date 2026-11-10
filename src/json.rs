@@ -31,6 +31,13 @@ impl Json {
             0
         }
     }
+    pub fn number_signed(&self) -> i64 {
+        if let Self::Number(s) = self {
+            s.parse().unwrap_or(0)
+        } else {
+            0
+        }
+    }
     pub fn number_rational(&self) -> Option<(i64, u64)> {
         if let Self::Number(s) = self {
             if let Ok(i) = s.parse::<i64>() {
