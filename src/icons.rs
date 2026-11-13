@@ -90,4 +90,4 @@ pub fn favicon_ico() -> Vec<u8> {
     out
 }
 pub const SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#05060a"/><circle cx="16" cy="16" r="9" fill="none" stroke="#62e6c9" stroke-width="2"/><circle cx="16" cy="16" r="3" fill="#e8b05c"/></svg>"##;
-pub const MANIFEST: &str = r##"{"name":"8c.is","short_name":"8c.is","start_url":"/","display":"standalone","background_color":"#05060a","theme_color":"#05060a","icons":[{"src":"/apple-touch-icon.png","sizes":"64x64","type":"image/png"},{"src":"/favicon.svg","sizes":"any","type":"image/svg+xml"}]}"##;
+pub const MANIFEST: &str = r##"{"name":"Text AI · tai.is","short_name":"Text AI","start_url":"/","display":"standalone","background_color":"#05060a","theme_color":"#05060a","icons":[{"src":"/apple-touch-icon.png","sizes":"64x64","type":"image/png"},{"src":"/favicon.svg","sizes":"any","type":"image/svg+xml"}]}"##;
