@@ -473,6 +473,7 @@ def setup_workspace(agent, root, g8t):
             {'action': 'external_directory', 'resource': '/data/AGENTS.md', 'effect': 'allow'},
             {'action': 'webfetch', 'resource': 'https://g8t.is/*', 'effect': 'allow'},
             {'action': 'webfetch', 'resource': 'https://8c.is/*', 'effect': 'allow'},
+            {'action': 'webfetch', 'resource': 'https://tai.is/*', 'effect': 'allow'},
             {'action': 'webfetch', 'resource': 'https://8b.is/*', 'effect': 'allow'},
             {'action': 'webfetch', 'resource': 'https://github.com/8b-is/*', 'effect': 'allow'},
         ]

@@ -614,7 +614,7 @@ if __name__ == "__main__":
     else:
         parser = argparse.ArgumentParser(description=__doc__)
         parser.add_argument("--config", default="agents.example.json")
-        parser.add_argument("--chat", default="https://8c.is")
+        parser.add_argument("--chat", default="https://tai.is")
         parser.add_argument("--state", default="/var/lib/8c-worker")
         args = parser.parse_args()
         work(args.config, args.chat, args.state)
