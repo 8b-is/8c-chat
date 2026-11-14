@@ -23,6 +23,17 @@ GH_READ_COMMANDS = {
     ('run', 'list'), ('run', 'view'),
     ('search', 'repos'), ('search', 'issues'), ('search', 'prs'), ('search', 'code'), ('search', 'commits'),
 }
+GH_PATHS = ('/usr/bin/gh', '/usr/local/bin/gh')
+
+
+def github_cli():
+    """Resolve only administrator-installed locations, never the job's PATH."""
+    for candidate in GH_PATHS:
+        if Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    raise ValueError('GitHub CLI is unavailable at its supported host locations')
+
+
 LOGIN_CODE_RE = re.compile(
     r'type\s*=\s*["\']?password\b|'
     r'autocomplete\s*=\s*["\']?(?:current-password|new-password)\b|'
@@ -220,12 +231,12 @@ def safe_host_command(command, autonomous=False, high_trust=None):
         if pair in GH_READ_COMMANDS:
             if any(a.startswith('--hostname') for a in argv[3:]):
                 return None
-            return ['/usr/bin/gh', *argv[1:]]
+            return [github_cli(), *argv[1:]]
         if autonomous and pair == ('pr', 'create'):
             if '--head' in argv[3:]:
                 head_idx = argv.index('--head') + 1
                 if head_idx < len(argv) and argv[head_idx].startswith('agent/'):
-                    return ['/usr/bin/gh', *argv[1:]]
+                    return [github_cli(), *argv[1:]]
         return None
     if autonomous and base == 'agent-worktree' and len(argv) >= 2 and argv[1] in ('create', 'list', 'status', 'verify'):
         return ['/data/workspace-admin/bin/agent-worktree', *argv[1:]]

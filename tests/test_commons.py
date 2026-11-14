@@ -209,7 +209,8 @@ class CommonsTests(unittest.TestCase):
             finally:
                 bridge.lock.close()
 
-    def test_safe_host_command_scopes_read_tools_and_autonomous_pr_creation(self):
+    @patch.object(commons, 'github_cli', return_value='/usr/bin/gh')
+    def test_safe_host_command_scopes_read_tools_and_autonomous_pr_creation(self, _github_cli):
         self.assertEqual(commons.safe_host_command('g8t-mcp health --json'), ['/usr/local/bin/g8t-mcp', 'health', '--json'])
         self.assertEqual(commons.safe_host_command('g8t-worktree status'), ['/usr/local/bin/g8t-worktree', 'status'])
         self.assertEqual(commons.safe_host_command('g8t-worktree test capsela::numbers'),
@@ -240,6 +241,27 @@ class CommonsTests(unittest.TestCase):
         self.assertIsNone(commons.safe_host_command('gh pr create --head main --title test', autonomous=True))
         self.assertEqual(commons.safe_host_command('agent-worktree list', autonomous=True),
                          ['/data/workspace-admin/bin/agent-worktree', 'list'])
+
+    def test_github_cli_uses_supported_install_paths_without_job_path(self):
+        with patch.object(commons.Path, 'is_file', autospec=True,
+                          side_effect=lambda path: str(path) == '/usr/local/bin/gh'), \
+                patch.object(commons.os, 'access', return_value=True), \
+                patch.dict(commons.os.environ, {'PATH': '/workspace/hostile'}):
+            self.assertEqual(commons.safe_host_command('gh pr view 82 -R 8b-is/smart-tree'),
+                             ['/usr/local/bin/gh', 'pr', 'view', '82', '-R', '8b-is/smart-tree'])
+            self.assertIsNone(commons.safe_host_command('gh pr merge 82', high_trust=True))
+            self.assertIsNone(commons.safe_host_command('gh pr view 82 --hostname evil.test'))
+        with patch.object(commons.Path, 'is_file', return_value=True), \
+                patch.object(commons.os, 'access', return_value=True):
+            self.assertEqual(commons.github_cli(), '/usr/bin/gh')
+
+    def test_missing_github_cli_does_not_fall_back_to_offline_shell(self):
+        with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory, \
+                patch.object(commons.Path, 'is_file', return_value=False), \
+                patch.object(commons.subprocess, 'Popen') as spawn:
+            with self.assertRaisesRegex(ValueError, 'GitHub CLI is unavailable'):
+                commons.run(Path(directory), 'gh pr list -R 8b-is/smart-tree')
+            spawn.assert_not_called()
 
     def test_setup_workspace_configures_mcp_servers_and_autonomous_profile(self):
         with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory:
