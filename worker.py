@@ -488,6 +488,7 @@ def work(config, origin, directory):
         memory = Memory(directory / "mem8", configuration["memory"], agents, Path(config).resolve().parent)
         pending = directory / "pending-result.json"
         inventory_cache = {}
+        next_agent = 0
         while True:
             try:
                 if pending.exists():
@@ -496,7 +497,13 @@ def work(config, origin, directory):
                         continue
                 if not sync_memory(memory, origin, key):
                     continue
-                for agent in agents:
+                first_agent = next_agent
+                for offset in range(len(agents)):
+                    # Delivery or peer-acceptance errors must not replace the spool.
+                    if pending.exists():
+                        break
+                    agent_index = (first_agent + offset) % len(agents)
+                    agent = agents[agent_index]
                     try:
                         cached = inventory_cache.get(agent["id"])
                         if cached is None or time.monotonic_ns() - cached[0] > 60_000_000_000:
@@ -511,6 +518,8 @@ def work(config, origin, directory):
                         job = reply.get("job")
                         if not reply.get("ok") or not job:
                             continue
+                        # Give the following agent first chance after this claimed turn.
+                        next_agent = (agent_index + 1) % len(agents)
                         result = {**proof, "id": job["id"], "lease": job["lease"], "room": job["room"]}
                         try:
                             result.update(generate_job(agent, job, memory, origin, key, claimed_at))
