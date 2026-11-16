@@ -2,13 +2,14 @@ use crate::{
     json::{self, Json},
     obj,
     store::{random_id, Store},
+    themes,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const REVISION: u64 = 10;
+pub const REVISION: u64 = 11;
 const RESTING: &str = "Pricey, but worth it ✨ — resting for a little recharge.";
 const RECENT: usize = 64;
 const MAX_PENDING: usize = 32;
@@ -84,6 +85,7 @@ pub struct Chat {
     store: Option<Store>,
     profiles: BTreeMap<String, Json>,
     messages: BTreeMap<String, VecDeque<Json>>,
+    room_themes: BTreeMap<String, Json>,
     jobs: BTreeMap<u64, Json>,
     recent_requests: VecDeque<Json>,
     presence: BTreeMap<String, (u64, String)>,
@@ -142,6 +144,7 @@ impl Chat {
             store: None,
             profiles: BTreeMap::new(),
             messages: BTreeMap::new(),
+            room_themes: BTreeMap::new(),
             jobs: BTreeMap::new(),
             recent_requests: VecDeque::new(),
             presence: BTreeMap::new(),
@@ -224,6 +227,20 @@ impl Chat {
                     {
                         return Err("Invalid stored message ID or room".into());
                     }
+                    // A style change and its factual public message are one durable
+                    // transaction. Old journal records simply have no style field.
+                    if *msg.get("room_theme") != Json::Null {
+                        if !matches!(
+                            msg.get("origin").text(),
+                            "room-theme" | "local-worker" | "hosted-worker"
+                        ) {
+                            return Err("Invalid stored room style origin".into());
+                        }
+                        let room = msg.get("room").text();
+                        themes::validate_stored(msg.get("room_theme"), &self.room_theme(room))?;
+                        self.room_themes
+                            .insert(room.into(), msg.get("room_theme").clone());
+                    }
                     if !self.imported && msg.get("origin").text() == "legacy" {
                         self.import_ids.insert(id);
                     }
@@ -242,7 +259,15 @@ impl Chat {
                     }
                 }
                 if !matches!(record.get("job"), Json::Null) {
-                    self.apply_job(record.get("job").clone());
+                    let mut job = record.get("job").clone();
+                    if record.get("type").text() == "result" {
+                        // Derive ACK truth from the committed message, including
+                        // results written by an older rollback binary which did
+                        // not understand these delivery bookkeeping fields.
+                        job.set("result_published", *record.get("message") != Json::Null);
+                        job.set("result_text", record.get("message").get("text").clone());
+                    }
+                    self.apply_job(job);
                 }
             }
             "job" => self.apply_job(record.get("job").clone()),
@@ -367,7 +392,7 @@ impl Chat {
         }).collect()
     }
     pub fn config(&self) -> Json {
-        obj! {"ok" => true, "revision" => REVISION, "rooms" => ROOMS.iter().map(|r| obj! {"id" => r.0, "name" => r.1, "description" => r.2}).collect::<Vec<_>>(), "agents" => self.agents_public(), "hottub" => self.tub_status(), "max_text" => 4000u64, "support_url" => self.support_url.clone()}
+        obj! {"ok" => true, "revision" => REVISION, "rooms" => ROOMS.iter().map(|r| obj! {"id" => r.0, "name" => r.1, "description" => r.2}).collect::<Vec<_>>(), "agents" => self.agents_public(), "hottub" => self.tub_status(), "max_text" => 4000u64, "support_url" => self.support_url.clone(), "room_themes" => themes::catalog()}
     }
     fn tub_status(&self) -> Json {
         let used = if now().saturating_sub(self.tub.get("window").number()) >= 3600 {
@@ -399,9 +424,57 @@ impl Chat {
             .collect::<Vec<_>>();
         let jobs = self.jobs.values().filter(|j| j.get("room").text()==room && j.get("status").text()!="complete").rev().take(8).map(|j| obj! {"id" => j.get("id").clone(), "agent" => j.get("agent").clone(), "status" => j.get("status").clone(), "error" => j.get("error").clone(), "requester" => j.get("requester").clone()}).collect::<Vec<_>>();
         Ok(
-            obj! {"ok" => true, "room" => room, "ui_revision" => REVISION, "messages" => self.messages.get(room).map(|q| q.iter().cloned().collect::<Vec<_>>()).unwrap_or_default(), "online" => online, "jobs" => jobs, "agents" => self.agents_public(), "hottub" => self.tub_status()},
+            obj! {"ok" => true, "room" => room, "ui_revision" => REVISION, "theme" => self.room_theme(room), "messages" => self.messages.get(room).map(|q| q.iter().cloned().collect::<Vec<_>>()).unwrap_or_default(), "online" => online, "jobs" => jobs, "agents" => self.agents_public(), "hottub" => self.tub_status()},
         )
     }
+    fn room_theme(&self, room: &str) -> Json {
+        self.room_themes
+            .get(room)
+            .cloned()
+            .unwrap_or_else(themes::initial)
+    }
+
+    /// Any introduced participant may style the public room, just as they may
+    /// participate in it. Only reviewed IDs are accepted; viewer motion/Off is
+    /// never shared. Compare-and-swap prevents a stale tab overwriting a new style.
+    pub fn set_room_theme(&mut self, body: &Json) -> Result<Json, String> {
+        let profile = self.profile(body)?;
+        let room = body.get("room").text();
+        if !valid_room(room) {
+            return Err("Unknown room".into());
+        }
+        let Json::Object(fields) = body else {
+            return Err("Invalid room style request".into());
+        };
+        if fields
+            .keys()
+            .any(|k| !["token", "room", "preset", "expected_revision"].contains(&k.as_str()))
+        {
+            return Err("Room styles accept only a reviewed preset, not custom code.".into());
+        }
+        self.rate(profile.get("handle").text(), 40)?;
+        let preset = body.get("preset").text();
+        let current = self.room_theme(room);
+        let theme = themes::change(
+            &current,
+            preset,
+            themes::revision(body.get("expected_revision"))?,
+            profile.get("name").text(),
+            profile.get("handle").text(),
+            now(),
+        )?;
+        if theme == current {
+            return Ok(obj! {"ok" => true, "theme" => current});
+        }
+        themes::validate_stored(&theme, &current)?;
+        if self.next_id >= 9_007_199_254_739_990 {
+            return Err("Message ID capacity reached".into());
+        }
+        let message = obj! {"id" => self.next_id, "room" => room, "timestamp_secs" => now(), "sender_handle" => profile.get("handle").clone(), "sender_name" => profile.get("name").clone(), "sender_kind" => "human", "origin" => "room-theme", "text" => format!("Set this room to {}. Your personal background and motion settings are unchanged.", themes::label(preset)?), "room_theme" => theme.clone()};
+        self.commit(obj! {"type" => "message", "message" => message})?;
+        Ok(obj! {"ok" => true, "theme" => theme})
+    }
+
     fn selected_agent(&self, room: &str, requested: &str, text: &str) -> Option<Json> {
         let eligible = self
             .agents
@@ -540,6 +613,13 @@ impl Chat {
                 let mut job = self.new_job(&a, room, handle, id + 1, id, false);
                 job.set("prompt", self.prompt(&job, &a, Some(&message)));
                 job.set("query", message.get("text").clone());
+                if themes::requested(message.get("text").text()) {
+                    job.set("room_theme_capability", themes::capability());
+                    job.set(
+                        "room_theme_revision",
+                        self.room_theme(room).get("revision").clone(),
+                    );
+                }
                 if self.jobs.values().filter(|j| !done(j)).count() >= MAX_PENDING {
                     job.set("status", "failed");
                     job.set(
@@ -577,6 +657,16 @@ impl Chat {
         job.set("created", now());
         job.set("error", "");
         job.set("result_received", false);
+        if job.get("room_theme_capability") == &themes::capability()
+            && themes::requested(job.get("query").text())
+        {
+            job.set(
+                "room_theme_revision",
+                self.room_theme(job.get("room").text())
+                    .get("revision")
+                    .clone(),
+            );
+        }
         job.set("lease", "");
         self.commit(obj! {"type" => "job", "job" => job})?;
         Ok(obj! {"ok" => true})
@@ -800,7 +890,9 @@ impl Chat {
             return Err("Reply lease mismatch".into());
         }
         if job.get("status").text() == "complete" || job.get("result_received").boolean() {
-            return Ok(obj! {"ok" => true, "duplicate" => true});
+            return Ok(
+                obj! {"ok" => true, "duplicate" => true, "published" => job.get("status").text() == "complete" && *job.get("result_published") != Json::Bool(false), "error" => job.get("error").clone(), "message" => if job.get("result_text").text().is_empty() { Json::Null } else { obj! {"text" => job.get("result_text").clone()} }},
+            );
         }
         if job.get("status").text() != "replying" || now() > job.get("lease_until").number() {
             return Err("Reply lease expired or cancelled".into());
@@ -813,7 +905,7 @@ impl Chat {
             self.commit(obj! {"type" => "job", "job" => job})?;
             return Ok(obj! {"ok" => true});
         }
-        let text = clean(body.get("text").text(), 4000)?;
+        let mut text = clean(body.get("text").text(), 4000)?;
         if body.get("model").text() != job.get("model").text()
             || body.get("runtime").text() != job.get("runtime").text()
             || body.get("agent").text() != job.get("agent").text()
@@ -843,6 +935,58 @@ impl Chat {
         {
             return Err("Missing hosted session evidence".into());
         }
+        let mut theme_change = Json::Null;
+        if *body.get("room_theme") != Json::Null {
+            let checked = (|| -> Result<Json, String> {
+                if job.get("autonomous").boolean()
+                    || job.get("requester").text().is_empty()
+                    || job.get("room_theme_capability") != &themes::capability()
+                    || !themes::requested(job.get("query").text())
+                {
+                    return Err(
+                        "Room styles can change only for a current, explicit participant request."
+                            .into(),
+                    );
+                }
+                let preset = themes::action(body.get("room_theme"))?;
+                let current = self.room_theme(job.get("room").text());
+                let updated = themes::change(
+                    &current,
+                    preset,
+                    themes::revision(job.get("room_theme_revision"))?,
+                    agent.get("name").text(),
+                    &format!("{}@8c.is", agent.get("id").text()),
+                    now(),
+                )?;
+                // This sentence is an action receipt, not a guessed model claim.
+                text = format!(
+                    "{} {}. Your personal background and motion settings are unchanged.",
+                    if updated == current {
+                        "This room already uses"
+                    } else {
+                        "Set this room to"
+                    },
+                    themes::label(preset)?
+                );
+                if updated == current {
+                    return Ok(Json::Null);
+                }
+                themes::validate_stored(&updated, &current)?;
+                Ok(updated)
+            })();
+            match checked {
+                Ok(theme) => theme_change = theme,
+                Err(reason) => {
+                    // ACK the failed result so delivery cannot poison the spool.
+                    // No success message, style change or accepted peer bundle.
+                    job.set("status", "failed");
+                    job.set("error", reason.clone());
+                    job.set("result_published", false);
+                    self.commit(obj! {"type" => "job", "job" => job})?;
+                    return Ok(obj! {"ok" => true, "published" => false, "error" => reason});
+                }
+            }
+        }
         job.set("status", "complete");
         let duplicate = job.get("autonomous").boolean()
             && self.messages.get("hot-tub").is_some_and(|v| {
@@ -855,11 +999,13 @@ impl Chat {
             Json::Null
         } else {
             obj! {
-                "id" => self.next_id, "timestamp_secs" => now(), "room" => job.get("room").clone(), "sender_handle" => format!("{}@8c.is",agent.get("id").text()), "sender_name" => agent.get("name").clone(), "sender_kind" => "aye", "text" => text, "origin" => if hosted(agent) {"hosted-worker"} else {"local-worker"}, "local_inference" => !hosted(agent), "provider" => route.get("provider").clone(), "session" => session, "work" => work, "model" => route.get("model").clone(), "model_digest" => body.get("digest").clone(), "runtime" => route.get("runtime").clone(), "personality_revision" => job.get("personality_revision").clone(), "reply_to" => job.get("parent_id").clone(), "elapsed_ms" => body.get("elapsed_ms").number(), "output_tokens" => body.get("output_tokens").clone(), "job_id" => id, "memory" => memory
+                "id" => self.next_id, "timestamp_secs" => now(), "room" => job.get("room").clone(), "sender_handle" => format!("{}@8c.is",agent.get("id").text()), "sender_name" => agent.get("name").clone(), "sender_kind" => "aye", "text" => text, "origin" => if hosted(agent) {"hosted-worker"} else {"local-worker"}, "local_inference" => !hosted(agent), "provider" => route.get("provider").clone(), "session" => session, "work" => work, "model" => route.get("model").clone(), "model_digest" => body.get("digest").clone(), "runtime" => route.get("runtime").clone(), "personality_revision" => job.get("personality_revision").clone(), "reply_to" => job.get("parent_id").clone(), "elapsed_ms" => body.get("elapsed_ms").number(), "output_tokens" => body.get("output_tokens").clone(), "job_id" => id, "memory" => memory, "room_theme" => theme_change
             }
         };
+        job.set("result_published", message != Json::Null);
+        job.set("result_text", message.get("text").clone());
         self.commit(obj! {"type" => "result", "message" => message.clone(), "job" => job})?;
-        Ok(obj! {"ok" => true, "message" => message})
+        Ok(obj! {"ok" => true, "published" => message != Json::Null, "message" => message})
     }
 }
 
@@ -1061,6 +1207,264 @@ mod tests {
         result.set("memory", memory);
         result
     }
+    #[test]
+    fn room_theme_manual_changes_are_authenticated_scoped_and_restartable() {
+        let f = Fixture::new();
+        let mut chat = f.open();
+        let p = intro(&mut chat);
+        let mut change = obj! {"token" => "wrong", "room" => "humayian-lounge", "preset" => "qwave-whisper-v1", "expected_revision" => 0u64};
+        assert!(chat.set_room_theme(&change).is_err());
+        change.set("token", p.get("token").clone());
+        let theme = chat.set_room_theme(&change).unwrap().get("theme").clone();
+        assert_eq!(theme.get("revision").number(), 1);
+        assert_eq!(chat.room_theme("model-lab"), themes::initial());
+        assert_eq!(
+            chat.room("humayian-lounge", "").unwrap().get("theme"),
+            &theme
+        );
+        let messages = chat.messages["humayian-lounge"].len();
+        change.set("expected_revision", 1u64);
+        assert_eq!(chat.set_room_theme(&change).unwrap().get("theme"), &theme);
+        assert_eq!(chat.messages["humayian-lounge"].len(), messages);
+        let mut invalid = change.clone();
+        invalid.set("script", "alert(1)");
+        assert!(chat.set_room_theme(&invalid).is_err());
+        change.set("preset", "violet-night-v1");
+        assert!(chat.set_room_theme(&change).is_err(), "cooldown");
+        change.set("preset", "none");
+        change.set("expected_revision", 0u64);
+        assert!(chat.set_room_theme(&change).is_err(), "stale reset");
+        change.set("expected_revision", 1u64);
+        let reset = chat.set_room_theme(&change).unwrap().get("theme").clone();
+        drop(chat);
+        let chat = f.open();
+        assert_eq!(chat.room_theme("humayian-lounge"), reset);
+        assert_eq!(reset.get("revision").number(), 2);
+    }
+
+    #[test]
+    fn aye_theme_effect_and_reply_commit_once_and_survive_restart() {
+        let f = Fixture::new();
+        let mut chat = f.open();
+        let p = intro(&mut chat);
+        let mut request = note(&p, "room-style-0001");
+        request.set("text", "Please give this room the qwave background");
+        chat.post(&request).unwrap();
+        let job = chat.poll(&worker("aye")).unwrap().get("job").clone();
+        assert_eq!(job.get("room_theme_capability"), &themes::capability());
+        let mut reply = answer(&job);
+        reply.set("room_theme", obj! {"preset" => "qwave-whisper-v1"});
+        let result = chat.result(&reply).unwrap();
+        let message = result.get("message").clone();
+        assert!(result.get("published").boolean());
+        assert!(message.get("text").text().contains("Qwave Whisper"));
+        assert_eq!(message.get("room_theme").get("revision").number(), 1);
+        let duplicate = chat.result(&reply).unwrap();
+        assert!(duplicate.get("duplicate").boolean());
+        assert_eq!(duplicate.get("message").get("text"), message.get("text"));
+        assert_eq!(
+            chat.room_theme("humayian-lounge").get("revision").number(),
+            1
+        );
+        assert_eq!(chat.room_theme("model-lab"), themes::initial());
+        drop(chat);
+        let chat = f.open();
+        assert_eq!(
+            chat.room_theme("humayian-lounge"),
+            *message.get("room_theme")
+        );
+        assert_eq!(chat.messages["humayian-lounge"].back(), Some(&message));
+    }
+
+    #[test]
+    fn greeting_cannot_grant_a_style_action_from_recalled_history() {
+        let f = Fixture::new();
+        let mut chat = f.open();
+        let p = intro(&mut chat);
+        let mut old = note(&p, "room-style-old1");
+        old.set("text", "Set this room to qwave background");
+        old.set("ask_aye", "no");
+        chat.post(&old).unwrap();
+        chat.post(&note(&p, "room-style-new1")).unwrap();
+        let job = chat.poll(&worker("aye")).unwrap().get("job").clone();
+        assert_eq!(*job.get("room_theme_capability"), Json::Null);
+        let mut reply = answer(&job);
+        reply.set("room_theme", obj! {"preset" => "qwave-whisper-v1"});
+        let before = chat.messages["humayian-lounge"].len();
+        let result = chat.result(&reply).unwrap();
+        assert!(!result.get("published").boolean());
+        assert!(!result.get("error").text().is_empty());
+        assert_eq!(chat.messages["humayian-lounge"].len(), before);
+        assert_eq!(chat.room_theme("humayian-lounge"), themes::initial());
+        assert!(!chat.result(&reply).unwrap().get("published").boolean());
+        assert_eq!(
+            chat.jobs[&job.get("id").number()].get("status").text(),
+            "failed"
+        );
+    }
+
+    #[test]
+    fn stale_style_result_is_failed_without_overwriting_newer_style() {
+        let f = Fixture::new();
+        let mut chat = f.open();
+        let p = intro(&mut chat);
+        let mut request = note(&p, "room-style-race1");
+        request.set("text", "Reset the room background");
+        chat.post(&request).unwrap();
+        let job = chat.poll(&worker("aye")).unwrap().get("job").clone();
+        chat.set_room_theme(&obj! {"token" => p.get("token").clone(), "room" => "humayian-lounge", "preset" => "qwave-whisper-v1", "expected_revision" => 0u64}).unwrap();
+        let mut reply = answer(&job);
+        reply.set("room_theme", obj! {"preset" => "none"});
+        assert!(!chat.result(&reply).unwrap().get("published").boolean());
+        assert_eq!(
+            chat.room_theme("humayian-lounge").get("preset").text(),
+            "qwave-whisper-v1"
+        );
+        assert!(!chat.result(&reply).unwrap().get("published").boolean());
+        chat.retry(&obj! {"token" => p.get("token").clone(), "id" => job.get("id").clone()})
+            .unwrap();
+        let retried = chat.poll(&worker("aye")).unwrap().get("job").clone();
+        assert_eq!(retried.get("room_theme_revision").number(), 1);
+        let mut reply = answer(&retried);
+        reply.set("room_theme", obj! {"preset" => "none"});
+        assert!(chat.result(&reply).unwrap().get("published").boolean());
+        assert_eq!(
+            chat.room_theme("humayian-lounge").get("preset").text(),
+            "none"
+        );
+    }
+
+    #[test]
+    fn style_effect_cannot_bypass_provenance_or_memory_checks() {
+        let f = Fixture::new();
+        let mut chat = f.open();
+        let p = intro(&mut chat);
+        let mut request = note(&p, "room-style-proof1");
+        request.set("text", "Please change this room background to qwave");
+        chat.post(&request).unwrap();
+        let job = chat.poll(&worker("aye")).unwrap().get("job").clone();
+        let mut valid = answer(&job);
+        valid.set("room_theme", obj! {"preset" => "qwave-whisper-v1"});
+        for (field, bad) in [
+            ("worker_key", Json::from("wrong")),
+            ("lease", Json::from("wrong")),
+            ("digest", Json::from("f".repeat(64))),
+            ("provider", Json::from("unconfigured")),
+            ("memory", Json::Null),
+        ] {
+            let mut reply = valid.clone();
+            reply.set(field, bad);
+            assert!(chat.result(&reply).is_err(), "{field}");
+            assert_eq!(chat.room_theme("humayian-lounge"), themes::initial());
+        }
+        assert!(chat.result(&valid).unwrap().get("published").boolean());
+    }
+
+    #[test]
+    fn style_survives_history_ring_eviction_and_restart() {
+        let f = Fixture::new();
+        let mut chat = f.open();
+        let p = intro(&mut chat);
+        let theme = chat.set_room_theme(&obj! {"token" => p.get("token").clone(), "room" => "humayian-lounge", "preset" => "qwave-whisper-v1", "expected_revision" => 0u64}).unwrap().get("theme").clone();
+        for _ in 0..70 {
+            let message = obj! {"id" => chat.next_id, "room" => "humayian-lounge", "text" => "Synthetic history-ring filler", "sender_kind" => "human", "origin" => "participant"};
+            chat.commit(obj! {"type" => "message", "message" => message})
+                .unwrap();
+        }
+        assert_eq!(chat.messages["humayian-lounge"].len(), RECENT);
+        assert!(chat.messages["humayian-lounge"]
+            .iter()
+            .all(|m| *m.get("room_theme") == Json::Null));
+        drop(chat);
+        let chat = f.open();
+        assert_eq!(chat.room_theme("humayian-lounge"), theme);
+    }
+
+    #[test]
+    fn legacy_result_ack_uses_committed_message_not_stale_bookkeeping() {
+        let f = Fixture::new();
+        let mut chat = f.open();
+        let p = intro(&mut chat);
+        chat.post(&note(&p, "legacy-ack-0001")).unwrap();
+        let mut job = chat.poll(&worker("aye")).unwrap().get("job").clone();
+        let reply = answer(&job);
+        job.set("status", "complete");
+        job.set("result_received", true);
+        job.set("result_published", false);
+        job.set("result_text", "stale bookkeeping retained by an old binary");
+        let message = obj! {"id" => chat.next_id, "room" => "humayian-lounge", "text" => "Actual legacy accepted reply", "sender_kind" => "aye", "origin" => "local-worker"};
+        chat.commit(obj! {"type" => "result", "message" => message, "job" => job})
+            .unwrap();
+        drop(chat);
+        let mut chat = f.open();
+        let ack = chat.result(&reply).unwrap();
+        assert!(ack.get("published").boolean());
+        assert_eq!(
+            ack.get("message").get("text").text(),
+            "Actual legacy accepted reply"
+        );
+    }
+
+    #[test]
+    fn autonomous_unknown_and_cross_room_style_results_never_publish() {
+        for (autonomous, action) in [
+            (true, obj! {"preset" => "qwave-whisper-v1"}),
+            (false, obj! {"preset" => "https://untrusted.test/script.js"}),
+            (
+                false,
+                obj! {"preset" => "qwave-whisper-v1", "room" => "model-lab"},
+            ),
+            (false, obj! {"preset" => "none", "javascript" => "alert(1)"}),
+            (false, Json::Array(vec![obj! {"preset" => "none"}])),
+        ] {
+            let f = Fixture::new();
+            let mut chat = f.open();
+            let p = intro(&mut chat);
+            let mut request = note(&p, "room-style-bound1");
+            request.set("text", "Set this room background to qwave");
+            chat.post(&request).unwrap();
+            let job = chat.poll(&worker("aye")).unwrap().get("job").clone();
+            if autonomous {
+                chat.jobs
+                    .get_mut(&job.get("id").number())
+                    .unwrap()
+                    .set("autonomous", true);
+            }
+            let mut reply = answer(&job);
+            reply.set("room_theme", action);
+            let before = chat.messages["humayian-lounge"].len();
+            assert!(!chat.result(&reply).unwrap().get("published").boolean());
+            assert_eq!(chat.messages["humayian-lounge"].len(), before);
+            assert_eq!(chat.room_theme("humayian-lounge"), themes::initial());
+            assert_eq!(chat.room_theme("model-lab"), themes::initial());
+            drop(chat);
+            let mut chat = f.open();
+            assert!(!chat.result(&reply).unwrap().get("published").boolean());
+        }
+    }
+
+    #[test]
+    fn style_store_failure_cannot_claim_an_effect() {
+        let f = Fixture::new();
+        let mut chat = f.open();
+        let p = intro(&mut chat);
+        let mut request = note(&p, "room-style-fail1");
+        request.set("text", "Set the background to qwave");
+        chat.post(&request).unwrap();
+        let job = chat.poll(&worker("aye")).unwrap().get("job").clone();
+        let mut reply = answer(&job);
+        reply.set("room_theme", obj! {"preset" => "qwave-whisper-v1"});
+        let old_store = chat.store.take();
+        assert!(chat.result(&reply).is_err());
+        assert_eq!(chat.room_theme("humayian-lounge"), themes::initial());
+        assert_eq!(
+            chat.jobs[&job.get("id").number()].get("status").text(),
+            "replying"
+        );
+        chat.store = old_store;
+        assert!(chat.result(&reply).unwrap().get("published").boolean());
+    }
+
     #[test]
     fn hosted_provenance_budget_pause_and_artifacts_survive_restart() {
         let f = Fixture::new();

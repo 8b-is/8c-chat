@@ -4,6 +4,7 @@ pub mod chat;
 mod icons;
 pub mod json;
 pub mod store;
+pub mod themes;
 
 use chat::Chat;
 use json::Json;
@@ -194,6 +195,7 @@ pub fn dispatch(state: &Mutex<Chat>, req: &Request) -> Response {
             "/api/messages" => chat.post(&body),
             "/api/retry" => chat.retry(&body),
             "/api/hottub" => chat.set_tub(&body),
+            "/api/room-theme" => chat.set_room_theme(&body),
             "/api/worker/poll" => chat.poll(&body),
             "/api/worker/result" => chat.result(&body),
             "/api/worker/memory" => chat.memory_feed(&body),
