@@ -25,6 +25,83 @@
   let identityBusy = false;
   const sending = new Set();
 
+  // Only these reviewed assets may be selected. Never render CSS/URLs from a reply.
+  const themeNames = new Map([["none", "Original"], ["qwave-whisper-v1", "Qwave whisper"], ["violet-night-v1", "Violet night"]]);
+  const viewKey = "8c_theme_view_v1";
+  let theme = {preset: "none", revision: 0, actor_name: ""};
+  let themeReady = false, themeRequest = null;
+  let view = {mode: "still", paused: false};
+  let pageAway = false;
+  const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  const forcedColors = matchMedia("(forced-colors: active)");
+  try {
+    const saved = JSON.parse(localStorage.getItem(viewKey) || "null");
+    if (saved && ["off", "still", "gentle"].includes(saved.mode) && typeof saved.paused === "boolean") view = {mode: saved.mode, paused: saved.paused};
+  } catch { el("themeStorageStatus").textContent = "Your viewing preference could not be restored. Still is on; changes will apply in this tab."; }
+  function saveView() {
+    try { localStorage.setItem(viewKey, JSON.stringify(view)); el("themeStorageStatus").textContent = ""; }
+    catch { el("themeStorageStatus").textContent = "Your viewing preference could not be saved. It still applies in this tab."; }
+    paintTheme();
+  }
+  function paintTheme() {
+    const off = view.mode === "off" || forcedColors.matches;
+    const moving = !off && view.mode === "gentle" && !view.paused && !reducedMotion.matches && !document.hidden && !pageAway;
+    el("roomSurface").dataset.theme = off ? "none" : theme.preset;
+    el("roomSurface").dataset.motion = moving ? "gentle" : "still";
+    el("themeMotion").value = view.mode;
+    el("themePause").textContent = view.paused ? "Resume motion" : "Pause motion";
+    el("themePause").setAttribute("aria-pressed", String(view.paused));
+    el("themePause").disabled = view.mode !== "gentle";
+    el("themeMotionStatus").textContent = forcedColors.matches ? "Room decoration is off for forced colors." : view.mode === "off" ? "Room themes are hidden on this browser." : reducedMotion.matches ? "Your reduced-motion setting keeps the background still." : view.paused ? "Motion is paused on this browser." : moving ? "Gentle motion is enabled; hidden pages pause it." : "The background stays still on this browser.";
+    const busy = themeRequest && themeRequest.room === room && themeRequest.generation === generation;
+    el("themeApply").disabled = !profile || !themeReady || Boolean(busy);
+    el("themeReset").disabled = !profile || !themeReady || Boolean(busy);
+    el("roomTheme").disabled = !profile || !themeReady || Boolean(busy);
+    el("themeAttribution").textContent = !profile ? "Introduce yourself to change the shared room. Viewing controls need no profile." : !themeReady ? "Loading this room’s theme…" : themeNames.get(theme.preset) + (theme.actor_name ? " · set by " + theme.actor_name : " · room default");
+  }
+  function receiveTheme(value) {
+    const next = value || {preset: "none", revision: 0};
+    if (!themeNames.has(next.preset) || !Number.isSafeInteger(next.revision) || next.revision < 0) return;
+    if (themeReady && next.revision < theme.revision) return;
+    if (!themeReady || next.revision !== theme.revision) {
+      theme = {preset: next.preset, revision: next.revision, actor_name: typeof next.actor_name === "string" ? next.actor_name.slice(0, 96) : ""};
+      el("roomTheme").value = theme.preset;
+    }
+    themeReady = true; paintTheme();
+  }
+  function resetRoomTheme() {
+    theme = {preset: "none", revision: 0, actor_name: ""}; themeReady = false;
+    el("roomTheme").value = "none"; el("themeStatus").textContent = ""; paintTheme();
+  }
+  async function changeTheme(preset) {
+    if (!profile || !themeReady || !themeNames.has(preset) || (themeRequest && themeRequest.room === room && themeRequest.generation === generation)) return;
+    const request = {room, generation}; themeRequest = request;
+    el("themeStatus").textContent = "Saving room theme…"; paintTheme();
+    try {
+      const result = await api("/api/room-theme", {room: request.room, preset, expected_revision: theme.revision});
+      if (room !== request.room || generation !== request.generation) return;
+      receiveTheme(result.theme);
+      el("themeStatus").textContent = "Room theme saved. Your viewing preference is unchanged.";
+    } catch (error) {
+      if (room === request.room && generation === request.generation) {
+        el("themeStatus").textContent = "Could not change the room theme: " + error.message + " Your draft is unchanged. Refreshing the room theme; try again when ready.";
+        poll();
+      }
+    } finally { if (themeRequest === request) themeRequest = null; paintTheme(); }
+  }
+  el("themeBtn").addEventListener("click", () => { paintTheme(); if (!el("themeSheet").open) el("themeSheet").showModal(); });
+  el("themeClose").addEventListener("click", () => el("themeSheet").close());
+  el("themeApply").addEventListener("click", () => changeTheme(el("roomTheme").value));
+  el("themeReset").addEventListener("click", () => changeTheme("none"));
+  el("themeMotion").addEventListener("change", () => { view.mode = el("themeMotion").value; saveView(); });
+  el("themePause").addEventListener("click", () => { view.paused = !view.paused; saveView(); });
+  el("themeLocalReset").addEventListener("click", () => { view = {mode: "still", paused: false}; saveView(); });
+  reducedMotion.addEventListener("change", paintTheme); forcedColors.addEventListener("change", paintTheme);
+  document.addEventListener("visibilitychange", paintTheme);
+  window.addEventListener("pagehide", () => { pageAway = true; paintTheme(); });
+  window.addEventListener("pageshow", () => { pageAway = false; paintTheme(); });
+  paintTheme();
+
   async function api(path, body, signal) {
     const own = signal ? null : new AbortController();
     const timeout = own ? setTimeout(() => own.abort(), 12000) : null;
@@ -56,7 +133,7 @@
     el("favoriteBtn").setAttribute("aria-pressed", String(Boolean(profile?.favorites?.includes(room))));
     el("favoriteBtn").textContent = profile?.favorites?.includes(room) ? "★" : "☆";
     refreshComposer();
-    paintRooms();
+    paintRooms(); paintTheme();
   }
   function showIdentity() {
     el("nameInput").value = profile?.name || "";
@@ -88,6 +165,7 @@
   function selectRoom(id) {
     if (!rooms.some(r => r.id === id)) return;
     room = id; generation += 1; initialized = false; lastMessages = ""; lastJobs = ""; follow = true;
+    resetRoomTheme();
     store("8c_room_v8", room);
     history.replaceState(null, "", "/?room=" + encodeURIComponent(room));
     el("messages").replaceChildren(); el("jobs").replaceChildren();
@@ -210,6 +288,7 @@
     try {
       const data = await api("/api/messages?room=" + encodeURIComponent(selected), null, controller.signal);
       if (controller !== pollController || selected !== room || epoch !== generation || data.room !== room) return;
+      receiveTheme(data.theme);
       el("connectionStatus").textContent = "";
       if (JSON.stringify(agents) !== JSON.stringify(data.agents)) { agents = data.agents; renderAgents(); }
       renderMessages(data.messages); renderJobs(data.jobs);

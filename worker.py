@@ -7,6 +7,7 @@ spool retains a finished result until the server acknowledges it.
 """
 import argparse
 import fcntl
+import hashlib
 import ipaddress
 import json
 import os
@@ -14,12 +15,16 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from memory import Memory, MemoryFault, MemoryDeadline, personal_recall
 from commons import exact_write_contract, exact_write_matches
+from reply_protocol import (FAILURE, ReplyProtocolError, anchor_job, checked_public,
+                            classify, mark_public, public_text, theme_reply, theme_presets,
+                            workspace_action, visible_text as strip_reasoning)
 
 LIMIT = 1_048_576
 HOSTED = ("opencode", "agy")
@@ -143,32 +148,23 @@ def inventory(agent, deadline=None):
 
 
 def visible_text(text):
-    # Reasoning sections are internal model output, not chat text.
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
-    if "<think>" in text:
-        text = text.split("<think>", 1)[0]
-    text = text.strip()
-    if text.casefold() in ('your natural public reply', 'your brief public reply', 'brief reply based only on observed results'):
-        raise ValueError('Internal tool JSON placeholder is not a public reply')
-    candidate = re.sub(r'^```(?:json)?\s*', '', text)
-    if candidate.startswith(('{', '[')):
-        def protocol(value):
-            if isinstance(value, list):
-                return any(protocol(item) for item in value)
-            if isinstance(value, dict):
-                return bool({'tool', 'command', 'text'} & value.keys()) or any(protocol(item) for item in value.values())
-            return False
-        try:
-            internal = protocol(json.loads(re.sub(r'\s*```$', '', candidate)))
-        except ValueError:
-            internal = bool(re.search(r'"(?:tool|command|text)"\s*:', candidate))
-        if internal:
-            raise ValueError("Internal tool JSON is not a public reply")
+    text = strip_reasoning(text)
+    if not text:
+        return text
+    try:
+        text, action = classify(text)
+        if action is not None:
+            raise ReplyProtocolError()
+    except ReplyProtocolError:
+        raise ValueError('Internal tool JSON is not a public reply') from None
     return text
 
 
-def conversation_text(text, agent, job, prompt):
-    text = visible_text(text)
+def conversation_text(text, agent, job, prompt, *, literal=False):
+    # An already validated say.text is literal content, not another tool envelope.
+    text = public_text(text) if literal else visible_text(text)
+    if text.casefold() in ('your natural public reply', 'your brief public reply', 'brief reply based only on observed results'):
+        raise ValueError('Internal tool JSON placeholder is not a public reply')
     if job.get('autonomous') and text != '[pause]':
         # Silence is preferable to replaying a quoted speaker or nearly copying
         # the context. This is delivery filtering, not a fabricated model answer.
@@ -215,12 +211,76 @@ def work_report(observations):
     return 'Observed workbench actions:\n' + '\n'.join(lines)
 
 
+def checked_generation(generation, job):
+    """Validate immutable local receipts without executing or repairing them.
+
+    Markers are trusted only on our private local receipts, never provider output.
+    Legacy receipts must already be plain public content; a tool/say envelope is
+    retained for operator review, not converted into a fresh action or answer.
+    """
+    answer = dict(generation)
+    try:
+        if checked_public(answer):
+            if public_text(answer.get('text')) != answer['text']:
+                raise ReplyProtocolError()
+        else:
+            if 'reply_protocol' in answer:
+                raise ReplyProtocolError()
+            text, action = classify(answer.get('text'), answer.get('finish_reason') or answer.get('done_reason'))
+            if action is not None or text != answer.get('text'):
+                raise ReplyProtocolError()
+        if 'room_theme' in answer:
+            effect = answer['room_theme']
+            if not isinstance(effect, dict) or set(effect) != {'preset'}:
+                raise ReplyProtocolError()
+            theme_reply({'tool': 'set_room_theme', **effect}, job)
+        # Legacy plain receipts already pass the delivery guard. Keep the entire
+        # frozen generation unchanged, including absence of new bookkeeping.
+        return answer
+    except ReplyProtocolError:
+        raise WorkRecovery('Saved reply requires protocol recovery; original work retained and not repeated.') from None
+
+
+def response_content(text, job, finish_reason=None):
+    try:
+        return classify(text, finish_reason)
+    except ReplyProtocolError:
+        # Decline belongs to the explicit capability lane, not general public
+        # JSON. This fallback validates the complete strict object, never extracts.
+        if not theme_presets(job):
+            raise
+        action = workspace_action(text, finish_reason)
+        if action['tool'] != 'decline':
+            raise ReplyProtocolError()
+        return action['text'], None
+
+
+def theme_format(job):
+    choices = tool_format(['say', 'decline'])['oneOf']
+    choices.append({'type': 'object', 'properties': {
+        'tool': {'const': 'set_room_theme'},
+        'preset': {'type': 'string', 'enum': list(theme_presets(job))}},
+        'required': ['tool', 'preset'], 'additionalProperties': False})
+    return {'oneOf': choices}
+
+
 def infer(agent, job):
+    job = anchor_job(job)
     if agent["runtime"] in HOSTED:
         if any(job[k] != agent[k] for k in ("model", "runtime")) or job["agent"] != agent["id"] or job.get("digest"):
             raise ValueError("Hosted job provenance mismatch")
         deadline = turn_deadline(job, 110)
-        return bridge(agent, "/infer", {**job, 'inference_deadline_ns': deadline}, timeout=remaining_seconds(deadline, 110))
+        answer = dict(bridge(agent, "/infer", {**job, 'inference_deadline_ns': deadline},
+                             timeout=remaining_seconds(deadline, 110)))
+        # Provider metadata and hosted raw receipts are not public validation.
+        answer.pop("room_theme", None)
+        answer.pop("reply_protocol", None)
+        text, action = response_content(answer.get("text"), job,
+                                        answer.get("finish_reason") or answer.get("done_reason"))
+        if action is not None:
+            text, answer["room_theme"] = theme_reply(action, job)
+        answer["text"] = text
+        return mark_public(answer)
     start = time.monotonic_ns()
     deadline = turn_deadline(job, 100)
     job = {**job, 'work_deadline_ns': deadline - LOCAL_FINALIZE_NS}
@@ -231,7 +291,12 @@ def infer(agent, job):
     if agent.get("cpu_only"):
         options["num_gpu"] = 0
     prompt = job["prompt"]
-    system = job["system"] + '\nYour workbench can change only isolated workspace files. You cannot directly change this website, its room themes/settings, or deploy it. For those requests offer a proposal, clearly state that nothing has been applied, and never invent or simulate an action.\n'
+    theme_allowed = bool(theme_presets(job))
+    system = job["system"]
+    if theme_allowed:
+        system += '\nROOM SETTING ONLY: Select the authorized preset with set_room_theme, or use say/decline without claiming a change. No workspace actions are authorized by this capability. You cannot deploy or otherwise modify the website.\n'
+    else:
+        system += '\nYour workbench can change only isolated workspace files. You cannot directly change this website, its room themes/settings, or deploy it. For those requests offer a proposal, clearly state that nothing has been applied, and never invent or simulate an action.\n'
     # Only the server's current-message field can enable local actions.
     # A legacy/missing query must not promote quoted room history to a request.
     query = job.get("query") if isinstance(job.get("query"), str) else ""
@@ -240,9 +305,9 @@ def infer(agent, job):
               + ". You are " + agent['name'] + ". Their introduction describes THEM, not you. Address them as you/your; do not adopt their name or hobbies.\n") if participant else ""
     # This is a conservative conversational hint, not authority to execute.
     # Explicit no-action and explanatory requests keep all workspace tools off.
-    no_actions = bool(re.search(r"\b(?:do not|don't|never|without)\s+(?:actually\s+)?(?:use|call|execute|create|write|read|inspect|run|test|list|check)\b", query, re.I))
+    no_actions = bool(re.search(r"\b(?:do not|don't|never|without)\s+(?:actually\s+)?(?:use|call|execute|create|write|read|inspect|run|test|list|check|browse|query)\b", query, re.I))
     no_actions = no_actions or bool(re.search(r"\b(?:explain|describe)\s+how\b|\bhow\s+(?:does|do)\s+.*\btool\b|\b(?:without|no)\s+(?:any\s+)?(?:tools|tool calls|actions)\b", query, re.I))
-    work_requested = not no_actions and not job.get("autonomous") and bool(re.search(r"\b(create|write|read|inspect|run|test|list|check|browse|query)\b", query, re.I)) and bool(re.search(r"\b(artifacts/|src/|tests/|shared/|reference/|tool\b|smart-tree\b|g8t-mcp\b|cloak-browse\b|gh\s+(?:pr|issue|repo|run|search)\b)", query, re.I))
+    work_requested = not theme_allowed and not no_actions and not job.get("autonomous") and bool(re.search(r"\b(create|write|read|inspect|run|test|list|check|browse|query)\b", query, re.I)) and bool(re.search(r"\b(artifacts/|src/|tests/|shared/|reference/|tool\b|smart-tree\b|g8t-mcp\b|cloak-browse\b|gh\s+(?:pr|issue|repo|run|search)\b)", query, re.I))
     exact_write, exact_error = None, None
     try:
         exact_write = exact_write_contract(query) if work_requested else None
@@ -261,16 +326,18 @@ def infer(agent, job):
             if "generation" in started:
                 if started["generation"].get("digest") != digest:
                     raise WorkRecovery("Saved work belongs to different model weights; recovery is required.")
-                return started["generation"]
+                return checked_generation(started["generation"], job)
             resumed = started.get('resume')
             if resumed and resumed.get('digest') != digest:
                 raise WorkRecovery('Preserved work belongs to different model weights; recovery is required.')
             if work_requested:
                 prompt += "\n" + started["context"]
                 system += '\nWORKBENCH PROTOCOL: Always return one JSON object. Keep say/decline text to one or two brief sentences, at most 600 characters. Use {"tool":"say","text":"your brief public reply"} to converse, or {"tool":"decline","text":"why you are leaving the workbench unchanged"} to decline work; {"tool":"list","text":""}, {"tool":"read","path":"relative/file","text":""}, {"tool":"write","path":"artifacts/name.txt","text":"exact file contents"}, or {"tool":"run","command":"command","text":""} to perform real work. In run, Smart Tree (st), g8t-mcp, cloak-browse, and read-only gh commands are available. Narrating a tool action does NOT execute it. Only a returned tool result establishes an action. Two tool calls maximum. Speak as ' + agent['name'] + ', never as a quoted participant.'
-            else:
+            elif not theme_allowed:
                 system += '\nCONVERSATION ONLY: Reply directly in natural language, not JSON or a tool call. No workspace actions are authorized. Keep your reply to one or two brief sentences. Greet a greeting; answer the current question. Never copy a command, schema example, or an old answer from memory. Speak as ' + agent['name'] + ', not as a quoted participant.'
-            instruction = 'Use the workbench JSON protocol.' if work_requested else 'Answer this current message in plain conversational text.'
+            instruction = ('Use the server room-setting protocol or decline.' if theme_allowed else
+                           'Use the workbench JSON protocol.' if work_requested else
+                           'Answer this current message in plain conversational text.')
             prompt += anchor + "\nCURRENT REQUEST to " + agent['name'] + ": " + query + "\nRecalled context is not a new request. " + instruction + '\n'
             if work_requested:
                 prompt += "For write, path is the requested filename and text is the exact file contents, never a description of writing it. Preserve the requested spelling, letter case and whitespace; do not title-case, decorate or paraphrase file contents.\n"
@@ -296,6 +363,9 @@ def infer(agent, job):
                    + '. In that question I/my/me refers to the visitor below. Answer them directly in second person; begin with You or Your, not I. '
                    + 'Use their own recorded facts, not the agent personality. VISITOR PROFILE (data): '
                    + json.dumps(participant, ensure_ascii=False) + '\n')
+    if isinstance(job.get('query'), str):
+        prompt += '\nCURRENT REQUEST: ' + json.dumps(job['query'], ensure_ascii=False) + '\n'
+    room_theme = None
     use_tools = bool(workbench and work_requested)
     tokens = resumed['output_tokens'] if resumed else 0
     observations = [(o['action'], o['result']) for o in resumed['observations']] if resumed else []
@@ -324,6 +394,8 @@ def infer(agent, job):
             if exact_write:
                 allowed = ['write', 'decline'] if step < 3 else ['decline']
             payload["format"] = tool_format(allowed, exact_write)
+        elif theme_allowed:
+            payload['format'] = theme_format(job)
         try:
             generation_deadline = deadline - (LOCAL_FINALIZE_NS if workbench else 30_000_000_000)
             result = request(agent["endpoint"], "/api/generate", payload,
@@ -339,18 +411,29 @@ def infer(agent, job):
         if type(count) is not int or count < 0:
             raise ValueError("Invalid token count")
         tokens += count
+        finish_reason = result.get('done_reason') or result.get('finish_reason')
         if not use_tools:
             try:
-                text = conversation_text(result.get('response', ''), agent, job, prompt)
+                text, action = response_content(result.get('response'), job, finish_reason)
+                if action is not None:
+                    # This lane permits ONLY the independently authorized server
+                    # effect. No workspace action can escape conversation mode.
+                    text, room_theme = theme_reply(action, job)
+                else:
+                    text = conversation_text(text, agent, job, prompt, literal=True)
             except ValueError as error:
+                reason = ('Internal tool JSON or incomplete output; ' + FAILURE
+                          if isinstance(error, ReplyProtocolError) else str(error))
                 if step == 3:
-                    raise ValueError('Invalid or disallowed public reply: ' + str(error)) from None
-                prompt += '\nThat response was rejected: ' + str(error) + '. Nothing was executed. Answer the CURRENT REQUEST in plain natural language, without a JSON wrapper or simulated action. Only describe changes as suggestions, not applied settings. For personal recall, address the current visitor as you/your; their introduction belongs to THEM, not you.\n'
+                    raise ValueError('Invalid or disallowed public reply: ' + reason) from None
+                instruction = ('Use only the authorized server setting or decline.' if theme_allowed else
+                               'Answer the CURRENT REQUEST in plain natural language, without a JSON wrapper or simulated action. Only describe changes as suggestions, not applied settings.')
+                prompt += '\nThat response was rejected: ' + reason + '. Nothing was executed. ' + instruction + ' For personal recall, address the current visitor as you/your; their introduction belongs to THEM, not you.\n'
                 continue
             break
         try:
-            action = json.loads(result.get("response", ""))
-        except ValueError:
+            action = workspace_action(result.get('response'), finish_reason)
+        except ReplyProtocolError:
             if observations:
                 text = work_report(observations)
                 break
@@ -403,10 +486,15 @@ def infer(agent, job):
         raise ValueError("Model changed during inference")
     elapsed = (time.monotonic_ns() - start) // 1_000_000 + (resumed['elapsed_ms'] if resumed else 0)
     answer = {"text": text, "digest": digest, "elapsed_ms": elapsed, "output_tokens": tokens}
+    if room_theme is not None:
+        answer["room_theme"] = room_theme
+    # Persist validation of explicit literal examples with the immutable local
+    # receipt. The bridge may only remark its own deterministic observed report.
+    answer = mark_public(answer)
     if workbench:
         answer = bridge(agent, "/workspace-result", {**job, "generation": answer},
                         timeout=remaining_seconds(deadline, 15))["generation"]
-    return answer
+    return checked_generation(answer, job)
 
 
 def save(path, value):
@@ -427,13 +515,50 @@ def sync_directory(path):
         os.close(fd)
 
 
+def quarantine_reply(pending, raw):
+    # Content-addressed name is stable, contains no model-supplied path/lease,
+    # and permits restart after preserving the original but before replacement.
+    target = pending.with_name("quarantine-reply-" + hashlib.sha256(raw).hexdigest() + ".json")
+    if target.exists():
+        if target.read_bytes() != raw:
+            raise OSError("Reply quarantine conflict")
+        return
+    fd, name = tempfile.mkstemp(prefix=".reply-quarantine-", dir=pending.parent)
+    temporary = Path(name)  # mkstemp creates mode 0600 even outside work().
+    try:
+        with os.fdopen(fd, "wb") as output:
+            output.write(raw)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, target)
+        sync_directory(pending.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def deliver(origin, key, pending, agents=(), deadline=None):
-    body = json.loads(pending.read_text())
     if deadline is not None and deadline - time.monotonic_ns() < 1_000_000_000:
-        return False  # Keep the spool for explicit acknowledgement/expiry recovery.
+        return False  # Retain bytes for later acknowledgement/expiry recovery.
+    raw = pending.read_bytes()
+    body = json.loads(raw)
+    if not body.get("error") and not checked_public(body):
+        try:
+            if "reply_protocol" in body:
+                raise ReplyProtocolError()  # Present but mismatched/legacy bookkeeping.
+            text, action = classify(body.get("text"), body.get("finish_reason") or body.get("done_reason"))
+            # A spool is a result, never a source of new actions or recovered text.
+            if action is not None or text != body.get("text"):
+                raise ReplyProtocolError()
+        except ReplyProtocolError:
+            quarantine_reply(pending, raw)
+            body = {k: v for k, v in body.items() if k not in ("text", "work", "memory", "room_theme", "reply_protocol")}
+            body["error"] = FAILURE
+            save(pending, body)  # Persist the safe retry before attempting transport.
+    # The validation marker is private spool bookkeeping, not public evidence.
+    public_body = {k: v for k, v in body.items() if k != "reply_protocol"}
     timeout = remaining_seconds(deadline, 15) if deadline is not None else 15
     try:
-        reply = request(origin, "/api/worker/result", {**body, "worker_key": key}, timeout=timeout)
+        reply = request(origin, "/api/worker/result", {**public_body, "worker_key": key}, timeout=timeout)
         if not reply.get("ok"):
             return False
     except urllib.error.HTTPError as error:
@@ -449,11 +574,26 @@ def deliver(origin, key, pending, agents=(), deadline=None):
         sync_directory(pending.parent)
         print("Reply expired/cancelled; server exposes a retry", flush=True)
         return True
+    if reply.get("published") is False or reply.get("error"):
+        # An acknowledged rejection is terminal, not permission to publish peers.
+        # Keep original bytes before clearing the spool; a failed preservation
+        # leaves it retryable against the server's durable rejected-job ACK.
+        quarantine_reply(pending, raw)
+        pending.unlink()
+        sync_directory(pending.parent)
+        print("Reply not published; server exposes a retry", flush=True)
+        return True
     # Publish peer artifacts only after the chat server accepted this turn.
     if body.get("work") and not body.get("error"):
         agent = next((a for a in agents if a["id"] == body["agent"]), None)
         if agent is not None:
-            bridge(agent, "/accept", {"id": body["id"], "lease": body["lease"], "room": body["room"]})
+            message = reply.get("message")
+            accepted_text = message["text"] if isinstance(message, dict) and "text" in message else body["text"]
+            if not isinstance(accepted_text, str) or not accepted_text or len(accepted_text) > 4000:
+                raise ReplyProtocolError()
+            bridge(agent, "/accept", {"id": body["id"], "lease": body["lease"], "room": body["room"],
+                                      "public_text": accepted_text},
+                   timeout=remaining_seconds(deadline, 15) if deadline is not None else 15)
     pending.unlink()
     sync_directory(pending.parent)
     print("Reply acknowledged", flush=True)
@@ -591,7 +731,7 @@ if __name__ == "__main__":
         payload = json.loads(sys.stdin.read(LIMIT))
         try:
             print(json.dumps(infer(payload["agent"], payload["job"])))
-        except ParticipantResting as error:
+        except (ParticipantResting, ReplyProtocolError) as error:
             print(json.dumps({"error": str(error)}))
     else:
         parser = argparse.ArgumentParser(description=__doc__)

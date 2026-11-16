@@ -8,6 +8,14 @@ that anyone can join or pause.
 - Browser-persisted identity and per-room drafts. Failed sends retain their text;
   retrying an acknowledged or lost-acknowledgement send does not duplicate it.
 - Durable Aye jobs with visible queued, replying, failed, and retry states.
+- Guarded public replies: malformed/truncated tool envelopes and action arrays
+  become retryable failures, not chat text or automatically repaired commands.
+- Reviewed room styles, including a faint Qwave-inspired background. Ask an Aye
+  to change the current room, or use Theme; Off/Still/Gentle and Pause stay local
+  to each visitor. See [the effect protocol](docs/room-theme-protocol.md) and
+  [display/accessibility controls](docs/room-themes-ui.md). The
+  [revision-11 validation handoff](docs/room-theme-validation.md) distinguishes
+  prepared source from the still-separate combined deployment.
 - Configured personalities and room-following, with model/runtime/digest receipts
   on every new Aye message.
 - Native Aurora MEM|8 recall: shared family context and room history, each Aye's
@@ -92,7 +100,9 @@ limits are documented in [the memory mechanism](docs/memory.md).
 ```sh
 cargo test --offline
 cargo clippy --offline --all-targets -- -D warnings
+cargo build --offline
 python3 -m unittest discover -s tests -v
+python3 tests/theme_integration.py  # real HTTP/journal, synthetic inference only
 node --check src/app.js
 git diff --check
 ```
@@ -104,6 +114,7 @@ npm install --prefix /tmp/opencode/8c-chat-browser playwright
 /tmp/opencode/8c-chat-browser/node_modules/.bin/playwright install chromium
 cargo build --offline
 PLAYWRIGHT_MODULE=/tmp/opencode/8c-chat-browser/node_modules/playwright node tests/browser.cjs
+PLAYWRIGHT_MODULE=/tmp/opencode/8c-chat-browser/node_modules/playwright node tests/themes-browser.cjs
 ```
 
 The browser suite covers two independent visitors, mobile layout, identity recall,

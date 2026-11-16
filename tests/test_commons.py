@@ -188,6 +188,36 @@ class CommonsTests(unittest.TestCase):
                 self.assertEqual(timeouts,[20,20,45,5])
                 self.assertEqual(active.exists(),interrupt_fails)
 
+    def test_shared_receipt_uses_server_accepted_text_not_cached_protocol(self):
+        with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory:
+            agent = {'id': 'astra', 'name': 'Astra', 'runtime': 'opencode', 'provider': 'openai', 'model': 'gpt-6-astra', 'binary': '/usr/bin/opencode'}
+            bridge = hosted.Bridge({'agents': [agent]}, directory)
+            raw = '{"tool":"set_room_theme","preset":"qwave-whisper-v1"}'
+            job = {'id': 3, 'lease': 'theme-test', 'room': 'model-lab', 'system': '', 'prompt': 'synthetic theme test'}
+            body = {**agent, 'agent': 'astra', 'job': job}
+            try:
+                with patch.object(hosted, 'request', return_value={'total_capsules': 5}), patch.object(hosted, 'opencode', return_value=(raw, 'ses_theme_test', 8, [], None)):
+                    generated = bridge.handle('/infer', body)
+                self.assertEqual(generated['text'], raw)
+                receipt_path = bridge.state/(bridge.key(bridge.agents['astra'], job)+'.json')
+                original_receipt = receipt_path.read_bytes()
+                with self.assertRaises(hosted.ReplyProtocolError):
+                    bridge.handle('/accept', body)
+                self.assertFalse((Path(directory)/'shared').exists())
+                job['public_text'] = 'Set this room to Qwave Whisper.'
+                bridge.handle('/accept', body)
+                bridge.handle('/accept', body)
+                accepted = list((Path(directory)/'shared'/'astra').glob('*.json'))
+                self.assertEqual(len(accepted), 1)
+                self.assertEqual(json.loads(accepted[0].read_text())['text'], job['public_text'])
+                self.assertEqual(json.loads((bridge.state/(bridge.key(bridge.agents['astra'], job)+'.json')).read_text())['text'], raw)
+                job['public_text'] = 'different text must not rewrite history'
+                with self.assertRaisesRegex(ValueError, 'Accepted artifact conflict'):
+                    bridge.handle('/accept', body)
+                self.assertEqual(receipt_path.read_bytes(), original_receipt)
+            finally:
+                bridge.lock.close()
+
     def test_hosted_receipt_replay_and_shared_artifacts_require_acceptance(self):
         with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory:
             agent = {'id': 'astra', 'name': 'Astra', 'runtime': 'opencode', 'provider': 'openai', 'model': 'gpt-6-astra', 'binary': '/usr/bin/opencode'}
@@ -218,11 +248,11 @@ class CommonsTests(unittest.TestCase):
         for rejected in ('g8t-mcp health; id', 'cloak-browse http://127.0.0.1:49375', 'gh repo delete 8b-is/g8t',
                          'gh pr merge 1', 'gh pr create --head agent/fix --title test'):
             self.assertIsNone(commons.safe_host_command(rejected, autonomous=False), rejected)
-        self.assertEqual(commons.safe_host_command('gh pr create --head agent/fix --title test', autonomous=True),
-                         ['/usr/bin/gh', 'pr', 'create', '--head', 'agent/fix', '--title', 'test'])
+        self.assertIsNone(commons.safe_host_command('gh pr create --head agent/fix --title test', autonomous=True))
         self.assertIsNone(commons.safe_host_command('gh pr create --head main --title test', autonomous=True))
-        self.assertEqual(commons.safe_host_command('agent-worktree list', autonomous=True),
-                         ['/data/workspace-admin/bin/agent-worktree', 'list'])
+        self.assertIsNone(commons.safe_host_command('agent-worktree list', autonomous=True))
+        for name in ('g8t-worktree', '8c-self-deploy'):
+            self.assertEqual(commons.safe_host_command(name + ' status'), ['/usr/local/bin/' + name, 'status'])
 
     def test_setup_workspace_configures_mcp_servers_and_autonomous_profile(self):
         with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory:
@@ -238,9 +268,10 @@ class CommonsTests(unittest.TestCase):
                 self.assertIn('commons', cfg['agents'])
                 self.assertIn('commons-autonomous', cfg['agents'])
                 self.assertIn('commons-funded', cfg['agents'])
-                if Path('/usr/local/bin/st').exists():
-                    self.assertIn('smart-tree', cfg['mcp']['servers'])
-                if Path('/usr/local/bin/g8t-mcp').exists():
-                    self.assertIn('g8t', cfg['mcp']['servers'])
-                if Path('/usr/local/bin/cloak-browse').exists():
-                    self.assertIn('cloakbrowser', cfg['mcp']['servers'])
+                self.assertEqual(cfg['mcp']['servers'], {})
+                self.assertEqual(cfg['plugins'], [])
+                permissions = cfg['agents']['commons']['permissions']
+                self.assertEqual(permissions, cfg['agents']['commons-autonomous']['permissions'])
+                self.assertEqual([p['resource'] for p in permissions if p['action'] == 'shell'],
+                                 ['/usr/local/libexec/8c-run *'])
+                self.assertFalse(any(p['effect'] == 'allow' and 'mcp' in p['action'] for p in permissions))
