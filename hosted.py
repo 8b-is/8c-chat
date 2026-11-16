@@ -71,15 +71,21 @@ def api(agent, method, path, body=None, timeout=20):
 
 def opencode(agent, prompt):
     model = {'providerID': agent['provider'], 'id': agent['model'], 'variant': agent.get('variant', 'low')}
-    session = api(agent, 'post', '/api/session', {'title': '8c ' + agent['name'] + ' paced turn', 'agent': agent.get('profile', 'commons'),
+    deadline = min(time.monotonic_ns() + 85_000_000_000, agent.get('turn_deadline_ns', 2**63-1))
+    def call(method, path, body=None, timeout=20):
+        remaining = (deadline - time.monotonic_ns()) // 1_000_000_000
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired('OpenCode turn', 85)
+        return api(agent, method, path, body, min(timeout, remaining))
+    session = call('post', '/api/session', {'title': '8c ' + agent['name'] + ' paced turn', 'agent': agent.get('profile', 'commons'),
                   'model': model, 'location': {'directory': agent['workspace']}})['data']['id']
     active = Path(agent['active_file']) if agent.get('active_file') else None
     if active:
         save(active, {'session': session})
     try:
-        api(agent, 'post', f'/api/session/{session}/prompt', {'text': prompt})
-        api(agent, 'post', f'/api/experimental/session/{session}/wait', timeout=85)
-        response = api(agent, 'get', f'/api/session/{session}/message?limit=40&order=desc')
+        call('post', f'/api/session/{session}/prompt', {'text': prompt})
+        call('post', f'/api/experimental/session/{session}/wait', timeout=85)
+        response = call('get', f'/api/session/{session}/message?limit=40&order=desc')
         messages = [m for m in response['data'] if m['type'] == 'assistant']
         if not messages or len(response['data']) >= 40:
             raise ValueError('Session did not finish within the bounded transcript')
@@ -99,20 +105,23 @@ def opencode(agent, prompt):
         cost = sum((Fraction(str(m.get('cost', 0))) for m in messages), Fraction(0))
         return text, session, tokens, tools, str(cost)
     finally:
-        api(agent, 'post', f'/api/session/{session}/interrupt')
+        api(agent, 'post', f'/api/session/{session}/interrupt', timeout=10)
         if active:
             active.unlink()
 
 
 def agy(agent, prompt):
+    timeout = min(95, (agent.get('turn_deadline_ns', time.monotonic_ns()+95_000_000_000)-time.monotonic_ns())//1_000_000_000)
+    if timeout <= 5:
+        raise subprocess.TimeoutExpired('agy turn',95)
     settings = {'toolPermission': 'request-review', 'allowNonWorkspaceAccess': False,
                 'permissions': {'allow': ['command(/usr/local/libexec/8c-run)', 'read_url(g8t.is)'],
                                 'deny': ['mcp(*)', 'execute_url(*)', 'write_file(.git/)', 'write_file(.agents/)',
                                          'write_file(.opencode/)', 'write_file(AGENTS.md)', 'write_file(reference/)', 'write_file(shared/)']}}
     args = [agent['binary'], '--model', agent['model'], '--sandbox', '--mode', 'accept-edits',
             '--settings', json.dumps(settings), '--disable-slash-commands', '--output-format', 'stream-json',
-            '--input-format', 'stream-json', '--print-timeout', '95s']
-    raw = command(args, agent['workspace'], 105, json.dumps({'event': 'user', 'message': {'content': prompt}}) + '\n')
+            '--input-format', 'stream-json', '--print-timeout', str(timeout-5)+'s']
+    raw = command(args, agent['workspace'], timeout, json.dumps({'event': 'user', 'message': {'content': prompt}}) + '\n')
     events = [json.loads(line, parse_float=str) for line in raw.splitlines() if line.strip()]
     initial = next(e['init'] for e in events if e['event'] == 'init')
     result = next(e['result'] for e in reversed(events) if e['event'] == 'result')
@@ -335,6 +344,10 @@ class Bridge:
             raise ValueError('An interrupted turn needs a new chat lease; not re-executed')
         save(attempt, {'agent': agent['id'], 'job': job['id'], 'started_at': time.time_ns() // 1_000_000_000})
         start = time.monotonic_ns()
+        # Include preparation and a possible primary/funded switch in one
+        # deadline, leaving ten seconds for OpenCode interruption before the
+        # worker's 110-second bridge timeout.
+        agent = {**agent, 'turn_deadline_ns': start + 95_000_000_000}
         before = artifacts(agent['workspace'])
         extra = self.prepare(agent)
         prompt = INSTRUCTIONS + '\n' + job['system'] + '\n' + job['prompt'] + extra

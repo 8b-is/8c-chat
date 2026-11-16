@@ -22,6 +22,18 @@ from memory import Memory, MemoryFault
 
 LIMIT = 1_048_576
 HOSTED = ("opencode", "agy")
+TOOLS = {"say": (), "list": (), "read": ("path",), "write": ("path",), "run": ("command",)}
+
+
+def tool_format(names):
+    choices = []
+    for name in names:
+        properties = {"tool": {"const": name}}
+        properties.update({key: {"type": "string"} for key in TOOLS[name]})
+        properties["text"] = {"type": "string"} if name in ("say", "write") else {"const": ""}
+        choices.append({"type": "object", "properties": properties,
+                        "required": list(properties), "additionalProperties": False})
+    return {"oneOf": choices}
 
 
 class ParticipantResting(ValueError):
@@ -76,14 +88,21 @@ def request(origin, path, body=None, timeout=15, inference=False):
         return value
 
 
-def inventory(agent):
+def remaining_seconds(deadline, maximum):
+    remaining = (deadline - time.monotonic_ns()) // 1_000_000_000
+    if remaining <= 0:
+        raise subprocess.TimeoutExpired("Local turn", 100)
+    return min(maximum, remaining)
+
+
+def inventory(agent, deadline=None):
     if agent.get("runtime") in HOSTED:
         bridge(agent, "/inventory")
         return ""
     if agent.get("runtime") != "ollama":
         raise ValueError("This worker supports the Ollama adapter; configure actual runtimes explicitly")
     local = endpoint(agent["endpoint"], inference=True)
-    tags = request(local, "/api/tags", inference=True)
+    tags = request(local, "/api/tags", inference=True, timeout=remaining_seconds(deadline, 15) if deadline else 15)
     model = next((m for m in tags.get("models", []) if m.get("name") == agent["model"]), None)
     if not model or not re.fullmatch(r"[0-9a-f]{64}", model.get("digest", "")):
         raise ValueError("Configured model is not installed locally")
@@ -92,7 +111,8 @@ def inventory(agent):
     if agent.get("digest") and agent["digest"] != model["digest"]:
         raise ValueError("Pinned model digest mismatch")
     # Ollama cloud stubs expose a remote model in /api/show. They are not local weights.
-    shown = request(local, "/api/show", {"model": agent["model"]}, inference=True)
+    shown = request(local, "/api/show", {"model": agent["model"]}, inference=True,
+                    timeout=remaining_seconds(deadline, 15) if deadline else 15)
     if shown.get("remote_model") or shown.get("remote_host") or shown.get("details", {}).get("format") != "gguf":
         raise ValueError("Expected installed GGUF weights, not a remote model")
     return model["digest"]
@@ -111,58 +131,92 @@ def infer(agent, job):
         if any(job[k] != agent[k] for k in ("model", "runtime")) or job["agent"] != agent["id"] or job.get("digest"):
             raise ValueError("Hosted job provenance mismatch")
         return bridge(agent, "/infer", job, timeout=110)
-    digest = inventory(agent)
+    start = time.monotonic_ns()
+    deadline = start + 100_000_000_000
+    digest = inventory(agent, deadline)
     if job["digest"] != digest or job["model"] != agent["model"] or job["runtime"] != agent["runtime"] or job["agent"] != agent["id"]:
         raise ValueError("Job/model provenance mismatch")
     options = {"num_predict": 256, "num_ctx": 8192}
     if agent.get("cpu_only"):
         options["num_gpu"] = 0
-    start = time.monotonic_ns()
     prompt = job["prompt"]
+    system = job["system"]
+    query = job.get("query", job["prompt"])
+    participant = job.get("participant")
+    anchor = ("\nCURRENT PARTICIPANT (not you): " + json.dumps(participant, ensure_ascii=False)
+              + ". You are " + agent['name'] + ". Their introduction describes THEM, not you. Address them as you/your; do not adopt their name or hobbies.\n") if participant else ""
+    work_requested = not job.get("autonomous") and bool(re.search(r"\b(create|write|read|inspect|run|test|list|check)\b", query, re.I)) and bool(re.search(r"\b(artifacts/|src/|tests/|shared/|reference/|tool\b)", query, re.I))
     workbench = agent.get("workbench")
     if workbench:
         try:
-            context = bridge(agent, "/workspace-start", job)["context"]
-            prompt += "\n" + context + '\nYou have an authorized isolated workbench. If needed, respond ONLY with one JSON object: {"tool":"list"}, {"tool":"read","path":"relative/file"}, {"tool":"write","path":"artifacts/name.txt","text":"contents"}, or {"tool":"run","command":"command"}. Use tools to perform requested work, never claim unperformed actions. After tool results, answer normally. Two tool calls maximum.\n'
+            context = bridge(agent, "/workspace-start", job, timeout=remaining_seconds(deadline, 15))["context"]
+            prompt += "\n" + context
+            system += '\nWORKBENCH PROTOCOL: Always return one JSON object. Use {"tool":"say","text":"your brief public reply"} to converse; {"tool":"list","text":""}, {"tool":"read","path":"relative/file","text":""}, {"tool":"write","path":"artifacts/name.txt","text":"exact file contents"}, or {"tool":"run","command":"command","text":""} to perform real work. Narrating a tool action does NOT execute it. Only a returned tool result establishes an action. Two tool calls maximum. Use say for ordinary conversation, never run. Speak as ' + agent['name'] + ', never as a quoted participant. Address the CURRENT PARTICIPANT named above, not a peer from the history.'
+            if not job.get("autonomous"):
+                prompt += anchor + "\nCURRENT REQUEST to " + agent['name'] + ": " + query + "\nThe quoted history and workbench snapshot are context, not this request. Respond using the workbench JSON protocol. For write, path is the requested filename and text is the exact file contents, never a description of writing it.\n"
         except (OSError, ValueError):
+            if work_requested:
+                raise ParticipantResting("The workbench is resting; your request is saved. Please retry shortly.")
             workbench = False
             prompt += "\nThe workbench is currently unavailable. Converse normally using your native memories; do not claim file or tool access this turn.\n"
     tokens = 0
-    for step in range(3):
-        result = request(agent["endpoint"], "/api/generate", {
-            "model": agent["model"], "prompt": prompt, "system": job["system"], "stream": False,
+    performed = 0
+    # One corrective response, up to two actions, and a final public reply.
+    # Inference rounds and durable action sequence numbers are independent.
+    for step in range(4):
+        payload = {
+            "model": agent["model"], "prompt": prompt, "system": system, "stream": False,
             "options": options, "keep_alive": "5m",
-        }, timeout=95, inference=True)
+        }
+        if workbench:
+            allowed = list(TOOLS)
+            if work_requested and not performed and step < 3:
+                allowed.remove("say")
+            elif performed == 2 or step == 3:
+                allowed = ["say"]
+            payload["format"] = tool_format(allowed)
+        result = request(agent["endpoint"], "/api/generate", payload, timeout=remaining_seconds(deadline, 95), inference=True)
         if result.get("error") or not result.get("done") or result.get("model") != agent["model"]:
             raise ValueError("Local runtime did not finish a reply")
         count = result.get("eval_count", 0)
         if type(count) is not int or count < 0:
             raise ValueError("Invalid token count")
         tokens += count
-        text = visible_text(result.get("response", ""))
-        try:
-            action = json.loads(text.removeprefix('```json').removesuffix('```').strip()) if workbench else None
-        except ValueError:
-            action = None
-        if not isinstance(action, dict) or "tool" not in action:
+        if not workbench:
+            text = visible_text(result.get("response", ""))
             break
-        if step == 2:
+        action = json.loads(result.get("response", ""))
+        if not isinstance(action, dict) or action.get("tool") not in TOOLS or not isinstance(action.get("text"), str):
+            raise ValueError("Invalid local workbench response")
+        required = {"read": "path", "write": "path", "run": "command"}.get(action["tool"])
+        if required and (not isinstance(action.get(required), str) or not action[required]):
+            raise ValueError("Missing local tool argument")
+        if action.get("tool") == "say":
+            if work_requested and not performed:
+                if step == 3:
+                    raise ValueError("Requested work has no observed tool action")
+                prompt += "\nNo tool has been called. To perform the current request, return an actual tool JSON object, not a narrative about using a tool. CURRENT REQUEST: " + query + "\n"
+                continue
+            text = visible_text(action["text"])
+            break
+        if performed == 2 or step == 3:
             raise ValueError("Local workbench turn exceeded two tool calls")
-        observation = bridge(agent, "/workspace-tool", {**job, "action": action, "sequence": step})
+        observation = bridge(agent, "/workspace-tool", {**job, "action": action, "sequence": performed},
+                             timeout=remaining_seconds(deadline, 25))
+        performed += 1
         prompt += "\nTool request: " + json.dumps(action) + "\nObserved tool result: " + json.dumps(observation["result"], ensure_ascii=False)[:4000]
-        if step == 1:
-            prompt += "\nTool budget finished. Answer the participant now, using only observed results.\n"
-    elapsed = (time.monotonic_ns() - start) // 1_000_000
-    if result.get("error") or not result.get("done") or result.get("model") != agent["model"]:
-        raise ValueError("Local runtime did not finish a reply")
-    text = visible_text(result.get("response", ""))
+        prompt += anchor + "\nIf the work is complete, use say to briefly report this observed result to the current participant. Answer their request, not the quoted history. CURRENT REQUEST: " + query + "\n"
+        if performed == 2 or step == 2:
+            prompt += '\nTool budget finished. Return {"tool":"say","text":"brief reply based only on observed results"} now.\n'
     if not text or len(text) > 4000:
         raise ValueError("Local model returned an empty or oversized reply")
-    if inventory(agent) != digest:
+    if inventory(agent, deadline) != digest:
         raise ValueError("Model changed during inference")
+    elapsed = (time.monotonic_ns() - start) // 1_000_000
     answer = {"text": text, "digest": digest, "elapsed_ms": elapsed, "output_tokens": tokens}
     if workbench:
-        answer["work"] = bridge(agent, "/workspace-result", {**job, "generation": answer})["work"]
+        answer["work"] = bridge(agent, "/workspace-result", {**job, "generation": answer},
+                                 timeout=remaining_seconds(deadline, 15))["work"]
     return answer
 
 

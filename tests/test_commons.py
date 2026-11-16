@@ -3,8 +3,10 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+import subprocess
 import commons
 import hosted
+import worker
 
 
 class CommonsTests(unittest.TestCase):
@@ -57,6 +59,62 @@ class CommonsTests(unittest.TestCase):
                 job['action']['command']='printf y >> counter.txt'
                 with self.assertRaises(ValueError):bridge.handle('/workspace-tool',body)
             finally:bridge.lock.close()
+
+    def test_local_correction_keeps_action_sequence_and_publishes_only_say_text(self):
+        with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory:
+            agent = {'id':'cheet', 'name':'Cheet', 'runtime':'ollama', 'model':'local:latest',
+                     'endpoint':'http://127.0.0.1:11435', 'workbench':'http://127.0.0.1:8799'}
+            bridge = hosted.Bridge({'agents':[agent]}, directory)
+            job = {'id':1, 'lease':'corrected', 'room':'model-lab', 'agent':'cheet', 'runtime':'ollama',
+                   'model':agent['model'], 'digest':'a'*64, 'system':'Answer the current visitor.',
+                   'prompt':'Use the write tool to create artifacts/marker.txt with copper lighthouse.'}
+            responses = iter([
+                {'tool':'say','text':'I created the file.'},  # No observed action: must be corrected.
+                {'tool':'write','path':'artifacts/marker.txt','text':'copper lighthouse'},
+                {'tool':'read','path':'artifacts/marker.txt','text':''},
+                {'tool':'say','text':'Created and read back the copper lighthouse file.'}])
+            sequences = []
+            def dispatch(a, path, j=None, **kwargs):
+                if path == '/workspace-tool': sequences.append(j['sequence'])
+                return bridge.handle(path, {'agent':a['id'], 'runtime':a['runtime'], 'model':a['model'], 'job':j})
+            def generate(origin, path, body, **kwargs):
+                return {'done':True, 'model':agent['model'], 'eval_count':10, 'response':json.dumps(next(responses))}
+            try:
+                with patch.object(hosted,'request',return_value={}), patch.object(worker,'inventory',return_value='a'*64), \
+                     patch.object(worker,'bridge',side_effect=dispatch), patch.object(worker,'request',side_effect=generate) as model:
+                    result = worker.infer(agent,job)
+                self.assertEqual(sequences,[0,1])
+                self.assertEqual(result['text'],'Created and read back the copper lighthouse file.')
+                self.assertEqual(result['work']['artifacts'][0]['text'],'copper lighthouse')
+                self.assertEqual(result['output_tokens'],40)
+                self.assertEqual(model.call_args.args[2]['format'],worker.tool_format(['say']))
+                self.assertFalse((Path(directory)/'shared').exists())
+            finally:bridge.lock.close()
+
+    def test_opencode_whole_turn_deadline_interrupts_and_retains_uncertain_session(self):
+        with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory:
+            active = Path(directory)/'active.json'
+            agent = {'id':'astra', 'name':'Astra', 'provider':'openai', 'model':'gpt-6-astra',
+                     'workspace':directory, 'active_file':str(active)}
+            for interrupt_fails in (False, True):
+                clock = [0]
+                timeouts = []
+                def api(a, method, path, body=None, timeout=20):
+                    timeouts.append(timeout)
+                    if path == '/api/session':
+                        clock[0] += 20_000_000_000
+                        return {'data':{'id':'ses_deadline'}}
+                    if path.endswith('/prompt'):
+                        clock[0] += 20_000_000_000
+                    elif path.endswith('/wait'):
+                        clock[0] += 46_000_000_000
+                    elif path.endswith('/interrupt'):
+                        if interrupt_fails: raise subprocess.TimeoutExpired('interrupt',10)
+                    else: self.fail('Transcript retrieval started after the whole-turn deadline')
+                with patch.object(hosted.time,'monotonic_ns',side_effect=lambda:clock[0]), patch.object(hosted,'api',side_effect=api):
+                    with self.assertRaises(subprocess.TimeoutExpired): hosted.opencode(agent,'Hello')
+                self.assertEqual(timeouts,[20,20,45,10])
+                self.assertEqual(active.exists(),interrupt_fails)
 
     def test_hosted_receipt_replay_and_shared_artifacts_require_acceptance(self):
         with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory:

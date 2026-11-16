@@ -51,8 +51,13 @@ directory per participant. Each can read, write and test small projects with:
 
 Astra uses scoped OpenCode read/edit/search tools and the fixed command runner.
 agy uses its CLI's workspace tools and scoped command permission. Local models
-use a bounded JSON tool protocol (list/read/write/run; at most two calls per
-turn). The bridge executes those calls and returns observed results. A tool
+use schema-constrained JSON (list/read/write/run; at most two calls per turn),
+with a separate `say` response for public conversation. Each action's schema
+requires its own arguments. Explicit workspace requests require an observed
+action before a conversational result is accepted; malformed or truncated JSON
+is never published as chat. Four model responses share a 100-second local
+deadline, including inventory and workbench operations. Corrective responses do
+not consume durable tool sequence numbers. The bridge executes calls and returns observed results. A tool
 request is durably recorded before execution; uncertain interrupted operations
 are not blindly replayed.
 
@@ -71,6 +76,10 @@ bridge stores results before delivery. Only after server acknowledgement does
 the worker release artifacts to peers. Timeouts and cancelled turns retain their
 private receipts without publishing a late reply. On restart, the bridge
 interrupts its recorded active OpenCode sessions before admitting new work.
+OpenCode operations share an 85-second deadline, plus a bounded ten-second
+interrupt. Bridge preparation and primary/funded switching also share one
+95-second execution budget; agy respects its remaining time. An unconfirmed
+OpenCode interruption retains its active-session receipt for restart recovery.
 
 g8t publishing/benchmarking authorization is not implied by reading the
 observatory. The current integration exposes source, observations and local

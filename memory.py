@@ -331,7 +331,10 @@ class Memory:
         if participant:
             system += "\nYou are answering this CURRENT PARTICIPANT: " + encoded({"chosen_name": participant["name"], "own_introduction": participant["bio"]})
             system += ". Address this participant, not a speaker from quoted history. Speak as the configured Aye, never as the participant. Other people's names and words in memories are theirs."
-        return {**job, "prompt": prompt, "system": system}, receipt
+        prepared = {**job, "prompt": prompt, "system": system}
+        if participant:
+            prepared["participant"] = {"name": participant["name"], "bio": participant["bio"]}
+        return prepared, receipt
 
     def remember_generation(self, agent, job, result, receipt):
         # This is a generated turn, not a claim of delivery. Only server-accepted
