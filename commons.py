@@ -16,6 +16,10 @@ FILE_LIMIT = 16_384
 FAMILY_REPOS = ('g8t', '8c-chat', 'deepsiper-enthea', 'smart-tree', 'aurora', 'CloakBrowser')
 FAMILY_DOCS = ('/data/AGENTS.md', '/data/8b-is/FAMILY_CONTEXT.md', '/data/8b-is/FAMILY_SEED.md')
 G8T_MCP_COMMANDS = ('health', 'endpoints', 'circuits', 'leaderboard', 'feed', 'digest', 'bench')
+EIGHTA_MCP_COMMANDS = (
+    'status', 'health', 'pads', 'list', 'read', 'get', 'raw',
+    'watch', 'events', 'feed', 'history', 'append', 'section', 'edit', 'replace',
+)
 GH_READ_COMMANDS = {
     ('repo', 'view'), ('repo', 'list'),
     ('pr', 'list'), ('pr', 'view'), ('pr', 'checks'), ('pr', 'diff'), ('pr', 'status'),
@@ -172,6 +176,8 @@ def safe_host_command(command, autonomous=False, high_trust=None):
     base = Path(argv[0]).name
     if base == 'g8t-mcp' and len(argv) >= 2 and argv[1] in G8T_MCP_COMMANDS:
         return ['/usr/local/bin/g8t-mcp', *argv[1:]]
+    if base == '8a-mcp' and len(argv) >= 2 and argv[1] in EIGHTA_MCP_COMMANDS:
+        return ['/usr/local/bin/8a-mcp', *argv[1:]]
     if base == 'g8t-worktree' and len(argv) >= 2:
         sub = argv[1]
         if sub == 'status' and len(argv) == 2:

@@ -229,12 +229,16 @@ def agy(agent, prompt):
         'command(/usr/local/libexec/8c-run)',
         'command(/usr/local/bin/st)',
         'command(/usr/local/bin/g8t-mcp)',
+        'command(/usr/local/bin/8a-mcp)',
         'command(/usr/local/bin/cloak-browse)',
         'mcp(smart-tree:*)',
         'mcp(g8t:*)',
+        'mcp(8a-is-scratchpad:*)',
         'mcp(cloakbrowser:*)',
         'read_url(g8t.is)',
+        'read_url(8a.is)',
         'read_url(8c.is)',
+        'read_url(tai.is)',
         'read_url(github.com)',
     ]
     if high_trust:
@@ -450,6 +454,7 @@ def setup_workspace(agent, root, g8t):
             {'action': 'shell', 'resource': '/usr/local/libexec/8c-run *', 'effect': 'allow'},
             {'action': 'shell', 'resource': '/usr/local/bin/st *', 'effect': 'allow'},
             {'action': 'shell', 'resource': '/usr/local/bin/g8t-mcp *', 'effect': 'allow'},
+            {'action': 'shell', 'resource': '/usr/local/bin/8a-mcp *', 'effect': 'allow'},
             {'action': 'shell', 'resource': '/usr/local/bin/g8t-worktree *', 'effect': 'allow'},
             {'action': 'shell', 'resource': '/usr/local/bin/8c-self-deploy *', 'effect': 'allow'},
             {'action': 'shell', 'resource': '/usr/local/bin/cloak-browse *', 'effect': 'allow'},
@@ -465,6 +470,7 @@ def setup_workspace(agent, root, g8t):
             {'action': 'external_directory', 'resource': '/usr/local/libexec/*', 'effect': 'allow'},
             {'action': 'external_directory', 'resource': '/usr/local/bin/*', 'effect': 'allow'},
             {'action': 'external_directory', 'resource': '/data/8b-is/g8t/*', 'effect': 'allow'},
+            {'action': 'external_directory', 'resource': '/data/8b-is/8a-pad/*', 'effect': 'allow'},
             {'action': 'external_directory', 'resource': '/data/8b-is/8c-chat/*', 'effect': 'allow'},
             {'action': 'external_directory', 'resource': '/data/8b-is/deepsiper-enthea/*', 'effect': 'allow'},
             {'action': 'external_directory', 'resource': '/data/8b-is/smart-tree/*', 'effect': 'allow'},
@@ -472,6 +478,7 @@ def setup_workspace(agent, root, g8t):
             {'action': 'external_directory', 'resource': '/data/8b-is/FAMILY_*.md', 'effect': 'allow'},
             {'action': 'external_directory', 'resource': '/data/AGENTS.md', 'effect': 'allow'},
             {'action': 'webfetch', 'resource': 'https://g8t.is/*', 'effect': 'allow'},
+            {'action': 'webfetch', 'resource': 'https://8a.is/*', 'effect': 'allow'},
             {'action': 'webfetch', 'resource': 'https://8c.is/*', 'effect': 'allow'},
             {'action': 'webfetch', 'resource': 'https://tai.is/*', 'effect': 'allow'},
             {'action': 'webfetch', 'resource': 'https://8b.is/*', 'effect': 'allow'},
@@ -513,6 +520,8 @@ def setup_workspace(agent, root, g8t):
             mcp_servers['smart-tree'] = {'type': 'local', 'command': ['/usr/local/bin/st', '--mcp']}
         if Path('/usr/local/bin/g8t-mcp').exists():
             mcp_servers['g8t'] = {'type': 'local', 'command': ['/usr/local/bin/g8t-mcp', 'mcp']}
+        if Path('/usr/local/bin/8a-mcp').exists():
+            mcp_servers['8a-is-scratchpad'] = {'type': 'local', 'command': ['/usr/local/bin/8a-mcp', 'stdio']}
         if Path('/usr/local/bin/cloak-browse').exists():
             mcp_servers['cloakbrowser'] = {'type': 'local', 'command': ['/usr/local/bin/cloak-browse', 'mcp']}
         if mcp_servers:
@@ -611,7 +620,17 @@ class Bridge:
                     target.write_text(json.dumps(value, ensure_ascii=False, indent=2))
                 index.append({'file': 'shared/' + name, 'agent': value['agent'], 'artifacts': [a['path'] for a in value['artifacts']]})
         (directory / 'shared' / 'index.json').write_text(json.dumps(index))
-        return '\nWorkbench: reference/g8t-live.json contains ' + json.dumps(self.snapshot) + '. Read shared/index.json for peer artifacts.\n'
+        pad_feed_note = ''
+        try:
+            pad_events_file = Path('/home/hue/.st/8a_pad_events.jsonl')
+            if pad_events_file.exists():
+                lines = [l.strip() for l in pad_events_file.read_text().splitlines() if l.strip()][-5:]
+                if lines:
+                    (directory / 'reference' / '8a-live.json').write_text('[' + ','.join(lines) + ']\n')
+                    pad_feed_note = ' reference/8a-live.json contains recent 8a.is scratchpad edits (use `8a-mcp` to read/edit).'
+        except OSError:
+            pass
+        return '\nWorkbench: reference/g8t-live.json contains ' + json.dumps(self.snapshot) + '.' + pad_feed_note + ' Read shared/index.json for peer artifacts.\n'
 
     def anchor_path(self, agent, job):
         if type(job.get('id')) is not int or job['id'] <= 0:
